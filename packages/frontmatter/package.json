@@ -1,0 +1,30 @@
+{
+  "name": "@coopkit/frontmatter",
+  "version": "0.1.0",
+  "description": "Shared event-frontmatter type contract for the coopkit toolkit.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cppserbia/coopkit.git",
+    "directory": "packages/frontmatter"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "test": "echo 'no tests for @coopkit/frontmatter (type-only package)'",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint src"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

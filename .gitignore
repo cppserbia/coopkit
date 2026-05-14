@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+.DS_Store
+
+# Env
+.env
+.env.local
+
+# Meetup credentials (never commit)
+*.pem
+
+# Editors
+.idea/
+.vscode/
+*.swp

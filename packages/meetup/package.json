@@ -1,0 +1,42 @@
+{
+  "name": "@coopkit/meetup",
+  "version": "0.1.0",
+  "description": "Create Meetup.com Draft events from Markdown files in a Git repo. Library + CLI for the coopkit toolkit.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cppserbia/coopkit.git",
+    "directory": "packages/meetup"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "bin": {
+    "coopkit-meetup": "./src/cli.ts"
+  },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint src"
+  },
+  "dependencies": {
+    "@coopkit/frontmatter": "workspace:*",
+    "citty": "^0.1.6",
+    "gray-matter": "^4.0.3",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
