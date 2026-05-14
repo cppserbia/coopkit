@@ -11,8 +11,8 @@
         "typescript": "^5.7.0",
       },
     },
-    "packages/frontmatter": {
-      "name": "@coopkit/frontmatter",
+    "packages/core": {
+      "name": "@coopkit/core",
       "version": "0.1.0",
     },
     "packages/meetup": {
@@ -22,7 +22,7 @@
         "coopkit-meetup": "./src/cli.ts",
       },
       "dependencies": {
-        "@coopkit/frontmatter": "workspace:*",
+        "@coopkit/core": "workspace:*",
         "citty": "^0.1.6",
         "gray-matter": "^4.0.3",
         "jsonwebtoken": "^9.0.2",
@@ -51,7 +51,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@1.9.4", "", { "os": "win32", "cpu": "x64" }, "sha512-8Y5wMhVIPaWe6jw2H+KlEm4wP/f7EW3810ZLmDlrEEy5KvBsb9ECEfu/kMWD484ijfQ8+nIi0giMgu9g1UAuuA=="],
 
-    "@coopkit/frontmatter": ["@coopkit/frontmatter@workspace:packages/frontmatter"],
+    "@coopkit/core": ["@coopkit/core@workspace:packages/core"],
 
     "@coopkit/meetup": ["@coopkit/meetup@workspace:packages/meetup"],
 

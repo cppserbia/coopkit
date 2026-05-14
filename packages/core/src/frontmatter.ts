@@ -1,12 +1,17 @@
 /**
- * The frontmatter shape coopkit packages read from event Markdown files.
+ * Event frontmatter shape — the YAML at the top of an event markdown file.
+ *
+ * This is one of two ways adopters describe events to coopkit. The other is
+ * `NormalizedEvent`. Adopters whose source-of-truth is one markdown file per
+ * event (e.g. `events/YYYY-MM-DD-slug.md`) use this shape directly. Adopters
+ * with a different source (a bullet list in README, a YAML data file, a CMS)
+ * produce `NormalizedEvent` objects via their own extractor.
  *
  * Adopter repos are free to add fields beyond this contract — coopkit packages
- * only consume what they need and ignore the rest. The fields listed here are
- * the ones that at least one official package reads or writes.
+ * only consume what they need.
  */
 export interface EventFrontmatter {
-  /** Event title. Used everywhere. */
+  /** Event title. */
   title: string;
 
   /** Event start (gray-matter parses YAML date scalars as `Date`). */

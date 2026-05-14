@@ -1,4 +1,4 @@
-import type { EventFrontmatter } from "@coopkit/frontmatter";
+import type { NormalizedEvent } from "@coopkit/core";
 import { resolveVenueId, type VenueMap } from "./venues.js";
 
 export interface CreateEventPayload {
@@ -12,17 +12,16 @@ export interface CreateEventPayload {
 }
 
 export interface BuildPayloadInput {
-  frontmatter: EventFrontmatter;
-  body: string;
+  event: NormalizedEvent;
   groupUrlname: string;
   resolveVenue: (name: string) => number;
 }
 
 const PLACEHOLDER_RE = /^<.*>$/;
 
-export function isEventAlreadyCreated(event_id: unknown): boolean {
-  if (event_id === null || event_id === undefined) return false;
-  const s = String(event_id).trim();
+export function isEventAlreadyCreated(eventId: unknown): boolean {
+  if (eventId === null || eventId === undefined) return false;
+  const s = String(eventId).trim();
   if (s === "") return false;
   if (PLACEHOLDER_RE.test(s)) return false;
   return /^\d+$/.test(s);
@@ -41,52 +40,45 @@ function naiveIsoString(date: Date): string {
 }
 
 export function buildCreateEventPayload(input: BuildPayloadInput): CreateEventPayload {
-  const { frontmatter, body, groupUrlname, resolveVenue } = input;
+  const { event, groupUrlname, resolveVenue } = input;
 
-  if (!frontmatter.title) {
-    throw new Error("Event is missing frontmatter `title`.");
+  if (!event.title) {
+    throw new Error("Event is missing `title`.");
   }
-  if (!(frontmatter.date instanceof Date) || Number.isNaN(frontmatter.date.getTime())) {
-    throw new Error("Event frontmatter `date` is missing or not a valid date.");
+  if (!(event.date instanceof Date) || Number.isNaN(event.date.getTime())) {
+    throw new Error("Event `date` is missing or not a valid date.");
   }
-  if (!frontmatter.venues || frontmatter.venues.length === 0) {
-    throw new Error("Event is missing frontmatter `venues`.");
+  if (!event.venueKey) {
+    throw new Error("Event is missing `venueKey`.");
   }
-  if (!frontmatter.duration) {
-    throw new Error("Event is missing frontmatter `duration`.");
-  }
-
-  const primaryVenue = frontmatter.venues[0];
-  if (!primaryVenue) {
-    throw new Error("Event frontmatter `venues[0]` is empty.");
+  if (!event.duration) {
+    throw new Error("Event is missing `duration`.");
   }
 
   return {
     groupUrlname,
-    title: frontmatter.title,
-    description: stripLeadingHeading(body),
-    startDateTime: naiveIsoString(frontmatter.date),
-    duration: frontmatter.duration,
-    venueId: String(resolveVenue(primaryVenue)),
+    title: event.title,
+    description: event.description ?? "",
+    startDateTime: naiveIsoString(event.date),
+    duration: event.duration,
+    venueId: String(resolveVenue(event.venueKey)),
     publishStatus: "DRAFT",
   };
 }
 
 /**
- * Convenience wrapper that builds a CreateEventPayload directly from a venue map.
- * Useful when adopters want the default resolveVenueId behavior.
+ * Convenience wrapper that resolves the venue against the supplied map.
+ * Adopters who want direct VenueMap lookup with no extra wiring can use this.
  */
 export function buildCreateEventPayloadWithMap(
-  frontmatter: EventFrontmatter,
-  body: string,
+  event: NormalizedEvent,
   groupUrlname: string,
-  venueMap: VenueMap
+  venues: VenueMap
 ): CreateEventPayload {
   return buildCreateEventPayload({
-    frontmatter,
-    body,
+    event,
     groupUrlname,
-    resolveVenue: (name) => resolveVenueId(name, venueMap),
+    resolveVenue: (name) => resolveVenueId(name, venues),
   });
 }
 

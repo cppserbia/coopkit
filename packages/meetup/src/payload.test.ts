@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { NormalizedEvent } from "@coopkit/core";
 import {
   buildCreateEventPayload,
   detectContentType,
@@ -83,17 +84,18 @@ describe("buildCreateEventPayload", () => {
     return id;
   };
 
-  const baseFrontmatter = {
+  const baseEvent: NormalizedEvent = {
+    id: "test-event",
     title: "Test Event",
     date: new Date("2025-09-18T18:00:00Z"),
     duration: "PT2H",
-    venues: ["Test Venue, Beograd, rs"],
+    venueKey: "Test Venue, Beograd, rs",
+    description: "This is the description body.",
   };
 
   it("builds a well-formed CreateEventInput for a typical event", () => {
     const payload = buildCreateEventPayload({
-      frontmatter: baseFrontmatter,
-      body: "# Test Event\n\nThis is the description body.",
+      event: baseEvent,
       groupUrlname: "cpp-serbia",
       resolveVenue,
     });
@@ -109,21 +111,28 @@ describe("buildCreateEventPayload", () => {
     });
   });
 
-  it("strips the leading H1 from the description", () => {
+  it("uses the event description verbatim (callers strip H1 themselves)", () => {
     const payload = buildCreateEventPayload({
-      frontmatter: baseFrontmatter,
-      body: "\n# Something Else\n\nBody text",
+      event: { ...baseEvent, description: "# Title\n\nBody" },
       groupUrlname: "cpp-serbia",
       resolveVenue,
     });
-    expect(payload.description).toBe("Body text");
+    expect(payload.description).toBe("# Title\n\nBody");
+  });
+
+  it("defaults description to empty string when missing", () => {
+    const payload = buildCreateEventPayload({
+      event: { ...baseEvent, description: undefined },
+      groupUrlname: "cpp-serbia",
+      resolveVenue,
+    });
+    expect(payload.description).toBe("");
   });
 
   it("throws when title is missing", () => {
     expect(() =>
       buildCreateEventPayload({
-        frontmatter: { ...baseFrontmatter, title: "" },
-        body: "body",
+        event: { ...baseEvent, title: "" },
         groupUrlname: "g",
         resolveVenue,
       })
@@ -133,33 +142,27 @@ describe("buildCreateEventPayload", () => {
   it("throws when date is missing or invalid", () => {
     expect(() =>
       buildCreateEventPayload({
-        frontmatter: {
-          ...baseFrontmatter,
-          date: undefined as unknown as Date,
-        },
-        body: "body",
+        event: { ...baseEvent, date: undefined as unknown as Date },
         groupUrlname: "g",
         resolveVenue,
       })
     ).toThrowError(/date/);
   });
 
-  it("throws when venues is empty", () => {
+  it("throws when venueKey is missing", () => {
     expect(() =>
       buildCreateEventPayload({
-        frontmatter: { ...baseFrontmatter, venues: [] },
-        body: "body",
+        event: { ...baseEvent, venueKey: undefined },
         groupUrlname: "g",
         resolveVenue,
       })
-    ).toThrowError(/venues/);
+    ).toThrowError(/venueKey/);
   });
 
   it("throws when duration is missing", () => {
     expect(() =>
       buildCreateEventPayload({
-        frontmatter: { ...baseFrontmatter, duration: undefined },
-        body: "body",
+        event: { ...baseEvent, duration: undefined },
         groupUrlname: "g",
         resolveVenue,
       })
@@ -168,11 +171,7 @@ describe("buildCreateEventPayload", () => {
 
   it("drops milliseconds from the startDateTime", () => {
     const payload = buildCreateEventPayload({
-      frontmatter: {
-        ...baseFrontmatter,
-        date: new Date("2025-09-18T18:30:45.123Z"),
-      },
-      body: "body",
+      event: { ...baseEvent, date: new Date("2025-09-18T18:30:45.123Z") },
       groupUrlname: "cpp-serbia",
       resolveVenue,
     });

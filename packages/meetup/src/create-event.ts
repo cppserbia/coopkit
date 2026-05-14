@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
+import type { EventFrontmatter, NormalizedEvent } from "@coopkit/core";
+import { frontmatterToNormalizedEvent } from "@coopkit/core";
 import matter from "gray-matter";
-import type { EventFrontmatter } from "@coopkit/frontmatter";
 import {
   createMeetupClient,
   MeetupApiError,
@@ -9,9 +11,10 @@ import {
 } from "./client.js";
 import {
   buildCreateEventPayload,
+  type CreateEventPayload,
   detectContentType,
   isEventAlreadyCreated,
-  type CreateEventPayload,
+  stripLeadingHeading,
 } from "./payload.js";
 import { resolveVenueId, type VenueMap } from "./venues.js";
 
@@ -138,76 +141,62 @@ async function uploadFeaturedPhoto(
   await client.uploadPhoto(uploadUrl, buffer, contentTypeHeader ?? "image/jpeg");
 }
 
-export interface CreateMeetupEventOptions {
-  /** Absolute or cwd-relative path to the event markdown file. */
-  eventFile: string;
-  /** Meetup group urlname (e.g. "cpp-serbia"). */
+export interface CreateMeetupDraftOptions {
+  event: NormalizedEvent;
   groupUrlname: string;
-  /** Mapping of frontmatter venue strings → numeric Meetup venue IDs. */
   venues: VenueMap;
-  /** If true, prints the payload and skips the API call. */
   dryRun?: boolean;
-  /** Override credentials. Defaults to standard MEETUP_* env vars. */
   credentials?: MeetupCredentials;
-  /** Logger. Defaults to console.error so stdout stays clean. */
   log?: (message: string) => void;
+  /**
+   * Invoked once after a successful create (and after the optional photo
+   * upload). The adopter persists `eventId` + `eventUrl` wherever their
+   * source-of-truth lives — frontmatter, an events.yml, a database, etc.
+   */
+  onCreated?: (info: {
+    event: NormalizedEvent;
+    result: { eventId: string; eventUrl: string; photoAttached: boolean };
+  }) => Promise<void> | void;
 }
 
-export type CreateMeetupEventResult =
-  | { status: "skipped"; reason: string }
+export type CreateMeetupDraftResult =
   | { status: "dry-run"; payload: CreateEventPayload }
   | { status: "created"; eventId: string; eventUrl: string; photoAttached: boolean };
 
 /**
- * Create a Meetup.com Draft event from an event markdown file, then patch
- * `event_url` + `event_id` back into the file's frontmatter.
- *
- * Idempotent: if frontmatter already contains a numeric `event_id`, this is a
- * no-op and returns `{status: "skipped"}`.
+ * Primary, platform-neutral entry point. Takes a `NormalizedEvent` from any
+ * source — file-per-event, README bullet list, YAML data, CMS, anything —
+ * and creates a Draft Meetup event for it. The optional `onCreated` callback
+ * is where the adopter writes back the IDs to their source.
  */
-export async function createMeetupEvent(
-  options: CreateMeetupEventOptions
-): Promise<CreateMeetupEventResult> {
+export async function createMeetupDraft(
+  options: CreateMeetupDraftOptions
+): Promise<CreateMeetupDraftResult> {
   const log = options.log ?? ((m) => console.error(m));
 
-  if (!fs.existsSync(options.eventFile)) {
-    throw new Error(`Event file not found: ${options.eventFile}`);
-  }
-
-  const raw = fs.readFileSync(options.eventFile, "utf8");
-  const parsed = matter(raw);
-  const frontmatter = parsed.data as EventFrontmatter & { imageUrl?: string };
-
-  if (isEventAlreadyCreated(frontmatter.event_id)) {
-    const reason = `${options.eventFile} already has event_id=${frontmatter.event_id}; nothing to do.`;
-    log(`[skip] ${reason}`);
-    return { status: "skipped", reason };
-  }
-
   const payload = buildCreateEventPayload({
-    frontmatter,
-    body: parsed.content,
+    event: options.event,
     groupUrlname: options.groupUrlname,
     resolveVenue: (name) => resolveVenueId(name, options.venues),
   });
 
   if (options.dryRun) {
-    log(`--- DRY RUN: would create Meetup draft for ${options.eventFile} ---`);
+    log(`--- DRY RUN: would create Meetup draft for ${options.event.id} ---`);
     console.log(JSON.stringify(payload, null, 2));
     return { status: "dry-run", payload };
   }
 
   const client = createMeetupClient(options.credentials);
-  log(`Creating Meetup draft: ${frontmatter.title}`);
-  const event = await callCreateEvent(client, payload);
-  log(`Created draft id=${event.id} url=${event.eventUrl}`);
+  log(`Creating Meetup draft: ${options.event.title}`);
+  const created = await callCreateEvent(client, payload);
+  log(`Created draft id=${created.id} url=${created.eventUrl}`);
 
   let photoAttached = false;
-  if (frontmatter.imageUrl) {
+  if (options.event.imageUrl) {
     try {
-      log(`Uploading featured photo from ${frontmatter.imageUrl}...`);
+      log(`Uploading featured photo from ${options.event.imageUrl}...`);
       const groupId = await getGroupId(client, options.groupUrlname);
-      await uploadFeaturedPhoto(client, groupId, event.id, frontmatter.imageUrl);
+      await uploadFeaturedPhoto(client, groupId, created.id, options.event.imageUrl);
       log("Photo attached.");
       photoAttached = true;
     } catch (err) {
@@ -216,15 +205,69 @@ export async function createMeetupEvent(
     }
   }
 
-  parsed.data.event_url = event.eventUrl;
-  parsed.data.event_id = event.id;
-  fs.writeFileSync(options.eventFile, matter.stringify(parsed.content, parsed.data));
-  log(`[updated] ${options.eventFile} with event_url + event_id`);
+  const result = { eventId: created.id, eventUrl: created.eventUrl, photoAttached };
+  if (options.onCreated) {
+    await options.onCreated({ event: options.event, result });
+  }
+  return { status: "created", ...result };
+}
 
-  return {
-    status: "created",
-    eventId: event.id,
-    eventUrl: event.eventUrl,
-    photoAttached,
-  };
+export interface CreateMeetupDraftFromFileOptions {
+  /** Path to the event markdown file (cppserbia-style: one event per file). */
+  eventFile: string;
+  groupUrlname: string;
+  venues: VenueMap;
+  dryRun?: boolean;
+  credentials?: MeetupCredentials;
+  log?: (message: string) => void;
+}
+
+export type CreateMeetupDraftFromFileResult =
+  | { status: "skipped"; reason: string }
+  | CreateMeetupDraftResult;
+
+/**
+ * Convenience wrapper for the file-per-event source pattern. Reads the
+ * markdown file, normalizes the frontmatter + (H1-stripped) body into a
+ * `NormalizedEvent`, calls `createMeetupDraft`, and writes `event_url` +
+ * `event_id` back into the file's frontmatter on success. Idempotent: if
+ * the frontmatter already contains a numeric `event_id`, returns
+ * `{status: "skipped"}` without calling Meetup.
+ */
+export async function createMeetupDraftFromFile(
+  options: CreateMeetupDraftFromFileOptions
+): Promise<CreateMeetupDraftFromFileResult> {
+  const log = options.log ?? ((m) => console.error(m));
+
+  if (!fs.existsSync(options.eventFile)) {
+    throw new Error(`Event file not found: ${options.eventFile}`);
+  }
+
+  const raw = fs.readFileSync(options.eventFile, "utf8");
+  const parsed = matter(raw);
+  const fm = parsed.data as EventFrontmatter & { event_id?: string | number };
+
+  if (isEventAlreadyCreated(fm.event_id)) {
+    const reason = `${options.eventFile} already has event_id=${fm.event_id}; nothing to do.`;
+    log(`[skip] ${reason}`);
+    return { status: "skipped", reason };
+  }
+
+  const id = path.basename(options.eventFile).replace(/\.md$/, "");
+  const event = frontmatterToNormalizedEvent(id, fm, stripLeadingHeading(parsed.content));
+
+  return createMeetupDraft({
+    event,
+    groupUrlname: options.groupUrlname,
+    venues: options.venues,
+    dryRun: options.dryRun,
+    credentials: options.credentials,
+    log,
+    onCreated: async ({ result }) => {
+      parsed.data.event_url = result.eventUrl;
+      parsed.data.event_id = result.eventId;
+      fs.writeFileSync(options.eventFile, matter.stringify(parsed.content, parsed.data));
+      log(`[updated] ${options.eventFile} with event_url + event_id`);
+    },
+  });
 }

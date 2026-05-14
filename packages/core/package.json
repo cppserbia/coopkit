@@ -1,12 +1,12 @@
 {
-  "name": "@coopkit/frontmatter",
+  "name": "@coopkit/core",
   "version": "0.1.0",
-  "description": "Shared event-frontmatter type contract for the coopkit toolkit.",
+  "description": "Shared types for the coopkit toolkit: NormalizedEvent (platform-neutral input for automation packages) and EventFrontmatter (file-on-disk shape).",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cppserbia/coopkit.git",
-    "directory": "packages/frontmatter"
+    "directory": "packages/core"
   },
   "type": "module",
   "main": "./src/index.ts",
@@ -20,7 +20,7 @@
   },
   "files": ["src", "README.md"],
   "scripts": {
-    "test": "echo 'no tests for @coopkit/frontmatter (type-only package)'",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint src"
   },

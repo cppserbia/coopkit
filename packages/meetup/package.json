@@ -28,7 +28,7 @@
     "lint": "biome lint src"
   },
   "dependencies": {
-    "@coopkit/frontmatter": "workspace:*",
+    "@coopkit/core": "workspace:*",
     "citty": "^0.1.6",
     "gray-matter": "^4.0.3",
     "jsonwebtoken": "^9.0.2"

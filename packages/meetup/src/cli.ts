@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
+import fs from "node:fs";
+import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";
 import { loadMeetupConfig } from "./config.js";
-import { createMeetupEvent } from "./create-event.js";
+import { createMeetupDraft, createMeetupDraftFromFile } from "./create-event.js";
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
 
 const createCmd = defineCommand({
   meta: {
     name: "create",
-    description: "Create a Meetup.com Draft event from an event markdown file.",
+    description:
+      "Create a Meetup.com Draft event from an event markdown file (file-per-event source).",
   },
   args: {
     eventFile: {
@@ -29,7 +32,7 @@ const createCmd = defineCommand({
   async run({ args }) {
     loadEnvFile();
     const config = loadMeetupConfig(args.config);
-    const result = await createMeetupEvent({
+    const result = await createMeetupDraftFromFile({
       eventFile: args.eventFile,
       groupUrlname: config.groupUrlname,
       venues: config.venues,
@@ -38,6 +41,64 @@ const createCmd = defineCommand({
     if (result.status === "skipped") {
       process.exit(0);
     }
+  },
+});
+
+function readStdin(): string {
+  return fs.readFileSync(0, "utf8");
+}
+
+function parseNormalizedEvent(json: string): NormalizedEvent {
+  const obj = JSON.parse(json) as Partial<NormalizedEvent> & { date?: string | Date };
+  if (!obj.id || typeof obj.id !== "string") {
+    throw new Error("JSON input is missing required `id` field (string).");
+  }
+  if (!obj.title || typeof obj.title !== "string") {
+    throw new Error("JSON input is missing required `title` field (string).");
+  }
+  if (!obj.date) {
+    throw new Error("JSON input is missing required `date` field (ISO string or Date).");
+  }
+  const date = obj.date instanceof Date ? obj.date : new Date(obj.date);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`JSON input has invalid \`date\`: ${String(obj.date)}`);
+  }
+  return { ...obj, date } as NormalizedEvent;
+}
+
+const createFromJsonCmd = defineCommand({
+  meta: {
+    name: "create-from-json",
+    description:
+      "Create a Meetup.com Draft event from a NormalizedEvent JSON object on stdin or in a file.",
+  },
+  args: {
+    file: {
+      type: "positional",
+      required: false,
+      description: "Path to a JSON file. If omitted, reads JSON from stdin.",
+    },
+    "dry-run": {
+      type: "boolean",
+      default: false,
+      description: "Print the CreateEventInput payload without calling the Meetup API.",
+    },
+    config: {
+      type: "string",
+      description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
+    },
+  },
+  async run({ args }) {
+    loadEnvFile();
+    const config = loadMeetupConfig(args.config);
+    const raw = args.file ? fs.readFileSync(args.file, "utf8") : readStdin();
+    const event = parseNormalizedEvent(raw);
+    await createMeetupDraft({
+      event,
+      groupUrlname: config.groupUrlname,
+      venues: config.venues,
+      dryRun: Boolean(args["dry-run"]),
+    });
   },
 });
 
@@ -112,6 +173,7 @@ const main = defineCommand({
   },
   subCommands: {
     create: createCmd,
+    "create-from-json": createFromJsonCmd,
     "list-venues": listVenuesCmd,
   },
 });
