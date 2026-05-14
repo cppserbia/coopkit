@@ -23,9 +23,7 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
   const resolved = path.resolve(configPath ?? DEFAULT_CONFIG_FILENAME);
   if (!fs.existsSync(resolved)) {
     throw new Error(
-      `coopkit config not found at ${resolved}. ` +
-        "Create a coopkit.config.json with a `meetup` block, " +
-        "or pass --config <path>."
+      `coopkit config not found at ${resolved}. Create a coopkit.config.json with a \`meetup\` block, or pass --config <path>.`
     );
   }
 

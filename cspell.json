@@ -1,0 +1,47 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "dictionaries": [
+    "en_US",
+    "typescript",
+    "node",
+    "html",
+    "css",
+    "npm",
+    "companies",
+    "softwareTerms",
+    "misc",
+    "cpp",
+    "fullstack",
+    "git",
+    "markdown",
+    "shell",
+    "scientific-terms-us",
+    "project-terms"
+  ],
+  "import": [
+    "@cspell/dict-cpp/cspell-ext.json",
+    "@cspell/dict-fullstack/cspell-ext.json",
+    "@cspell/dict-git/cspell-ext.json",
+    "@cspell/dict-markdown/cspell-ext.json",
+    "@cspell/dict-shell/cspell-ext.json",
+    "@cspell/dict-scientific-terms-us/cspell-ext.json"
+  ],
+  "dictionaryDefinitions": [
+    {
+      "name": "project-terms",
+      "path": "./.cspell/project-terms.txt",
+      "addWords": true
+    }
+  ],
+  "ignorePaths": [
+    "node_modules/**",
+    "dist/**",
+    ".turbo/**",
+    "bun.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    ".husky/_/**"
+  ],
+  "ignoreRegExpList": ["Urls", "Email", "HexValues", "Base64"]
+}

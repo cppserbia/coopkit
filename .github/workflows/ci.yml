@@ -10,10 +10,20 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  lint-workflows:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -23,11 +33,17 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        run: bun run test
+      - name: Lint
+        run: bun run lint
 
       - name: Format check
         run: bun run format:check
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Spell check
+        run: bun run spell
+
+      - name: Test
+        run: bun run test

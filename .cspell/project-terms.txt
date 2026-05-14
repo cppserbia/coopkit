@@ -1,0 +1,47 @@
+# Project-specific technical terms not covered by cspell's default or
+# imported dictionaries. One word per line. Comments begin with '#'.
+# Keep entries lowercase unless the cased form is the one that appears
+# in source (proper nouns, acronyms).
+Beograd
+biomejs
+bunx
+Centar
+citty
+codepath
+coopkit
+cppserbia
+cyanogenmod
+dedup
+devDep
+devrel
+docless
+favicons
+findup
+fpikus
+freebusy
+frontmatter
+globalcpp
+hackathon
+headshot
+jekyllrb
+Lemire
+linkedom
+metaprogramming
+monoglot
+monorepo
+mozjpeg
+namespaces
+opengraph
+postbuild
+prebuild
+slackbots
+slugified
+sortable
+Startit
+tspan
+unstaged
+urlname
+venueKey
+writeback
+yamllint
+youtu
