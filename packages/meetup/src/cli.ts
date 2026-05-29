@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import fs from "node:fs";
 import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";

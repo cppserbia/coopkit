@@ -10,10 +10,11 @@ Plus a `frontmatterToNormalizedEvent()` helper for the common file-per-event cas
 ## Install
 
 ```bash
-bun add @coopkit/core
+npm install @coopkit/core
+# or: bun add @coopkit/core
 ```
 
-> **Requires [Bun](https://bun.sh) 1.3+.** Ships TypeScript source, executed directly by Bun (not transpiled for Node).
+> Ships compiled ESM + type declarations. Works under **Node 18+** and **Bun 1.3+**.
 
 ## Two paths into the automation packages
 

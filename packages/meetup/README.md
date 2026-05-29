@@ -15,10 +15,11 @@ Three usage patterns:
 ## Install
 
 ```bash
-bun add @coopkit/meetup
+npm install @coopkit/meetup
+# or: bun add @coopkit/meetup
 ```
 
-> **Requires [Bun](https://bun.sh) 1.3+.** The package ships TypeScript source and is executed directly by Bun (the CLI bin is a `.ts` file). It is not transpiled for Node — `bunx`/`bun` consumers only. The reusable workflows and the Marketplace action both run it via `bunx --bun`.
+> Ships compiled ESM + type declarations. Works under **Node 18+** and **Bun 1.3+**. The CLI is available as `coopkit-meetup` (run via `npx coopkit-meetup …` or `bunx coopkit-meetup …`).
 
 ## One-time Meetup OAuth setup
 
