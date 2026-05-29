@@ -1,0 +1,109 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack and validate without publishing to npm.
+        type: boolean
+        default: true
+
+# Avoid two publishes racing (e.g. a fast re-tag).
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Gate: never publish code that doesn't build / typecheck / pass tests.
+      - name: Build
+        run: bun run build
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      - name: Verify package versions match the tag
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Tag version: $TAG_VERSION"
+          for dir in packages/core packages/meetup; do
+            PKG_VERSION=$(node -p "require('./$dir/package.json').version")
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::$dir is version $PKG_VERSION but the tag is $TAG_VERSION. Bump package.json or fix the tag."
+              exit 1
+            fi
+            echo "  $dir OK ($PKG_VERSION)"
+          done
+
+      - name: Configure npm auth
+        if: ${{ !inputs.dry_run }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is not set."
+            exit 1
+          fi
+          printf 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$HOME/.npmrc"
+
+      - name: Publish packages (core before meetup)
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          publish_pkg() {
+            local dir="$1"
+            local name version dist_tag
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+
+            # Prerelease versions (e.g. 0.2.0-rc.1) go under the `next` tag.
+            if [[ "$version" == *-* ]]; then dist_tag="next"; else dist_tag="latest"; fi
+
+            # Idempotent: skip a version that's already on the registry. Lets you
+            # bump only one package and re-run without a "version exists" failure.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "::notice::$name@$version already published — skipping"
+              return 0
+            fi
+
+            local flags=(--access public --tag "$dist_tag")
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              flags+=(--dry-run)
+              echo "DRY RUN: $name@$version (tag: $dist_tag)"
+            else
+              flags+=(--provenance)
+              echo "Publishing $name@$version (tag: $dist_tag)"
+            fi
+
+            ( cd "$dir" && bun publish "${flags[@]}" )
+          }
+
+          publish_pkg packages/core
+          publish_pkg packages/meetup
