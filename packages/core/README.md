@@ -11,8 +11,9 @@ Plus a `frontmatterToNormalizedEvent()` helper for the common file-per-event cas
 
 ```bash
 bun add @coopkit/core
-# or: npm install @coopkit/core
 ```
+
+> **Requires [Bun](https://bun.sh) 1.3+.** Ships TypeScript source, executed directly by Bun (not transpiled for Node).
 
 ## Two paths into the automation packages
 

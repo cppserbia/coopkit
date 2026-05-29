@@ -16,8 +16,9 @@ Three usage patterns:
 
 ```bash
 bun add @coopkit/meetup
-# or: npm install @coopkit/meetup
 ```
+
+> **Requires [Bun](https://bun.sh) 1.3+.** The package ships TypeScript source and is executed directly by Bun (the CLI bin is a `.ts` file). It is not transpiled for Node — `bunx`/`bun` consumers only. The reusable workflows and the Marketplace action both run it via `bunx --bun`.
 
 ## One-time Meetup OAuth setup
 
