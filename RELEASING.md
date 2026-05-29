@@ -1,39 +1,83 @@
 # Releasing
 
 Both packages (`@coopkit/core`, `@coopkit/meetup`) are versioned together and
-published to npm by the [`Publish`](.github/workflows/publish.yml) workflow.
+published to npm by the [`Publish`](.github/workflows/publish.yml) workflow,
+using **npm Trusted Publishing** (OIDC) — no long-lived npm token in the repo,
+and provenance is attached automatically.
 
-## One-time setup
+## How publishing works
 
-1. Create an **npm automation token** (npmjs.com → Access Tokens → Granular/Automation, with publish rights to the `@coopkit` scope).
-2. Add it as the repo secret **`NPM_TOKEN`** (Settings → Secrets and variables → Actions).
-3. The `@coopkit` org/scope must exist on npm and the token's account must be a member with publish rights.
+- The workflow runs the npm CLI with `id-token: write`. npm exchanges a
+  short-lived GitHub OIDC token for a publish token — there is no `NPM_TOKEN`
+  secret.
+- It publishes `@coopkit/core` first, then `@coopkit/meetup`.
+- `@coopkit/meetup` declares `"@coopkit/core": "workspace:*"` in source (for
+  local dev). npm can't publish the `workspace:` protocol, so the workflow
+  rewrites that dep to the concrete release version in the ephemeral checkout
+  right before `npm publish`. The committed source keeps `workspace:*`.
+
+> We publish with the **npm CLI** (not `bun publish`) because Trusted Publishing
+> is an npm CLI feature (the OIDC token exchange). Bun is still used to build and
+> test in the same job.
+
+## One-time setup (per package)
+
+Trusted Publishing is configured on npmjs.com **per package**, and a package
+must already exist before you can add a trusted publisher. So there's a
+bootstrap for the very first release of each package:
+
+1. **Bootstrap publish (once per package).** Publish `0.1.0` of each package a
+   first time using a granular npm token with publish rights — e.g. locally:
+
+   ```bash
+   bun run build
+   cd packages/core   && npm publish --access public
+   cd ../meetup       && npm pkg set dependencies.@coopkit/core=0.1.0 && npm publish --access public
+   ```
+
+   (You'll need `npm login` or `NPM_TOKEN` in your shell for this one-time step.)
+
+2. **Configure the trusted publisher.** On npmjs.com, for **each** of
+   `@coopkit/core` and `@coopkit/meetup`: package → **Settings → Trusted
+   Publishing → Add GitHub Actions publisher**:
+   - Organization/owner: `cppserbia`
+   - Repository: `coopkit`
+   - Workflow filename: `publish.yml`
+   - Environment: leave blank (we don't use a GH environment)
+
+3. Done. Every subsequent release is tokenless.
 
 ## Cutting a release
 
-1. Bump the `version` field in **both** `packages/core/package.json` and `packages/meetup/package.json` to the same value (e.g. `0.2.0`). Commit to `main`.
-2. Tag the commit and push the tag:
+1. Bump `version` in **both** `packages/core/package.json` and
+   `packages/meetup/package.json` to the same value (e.g. `0.2.0`). Commit to `main`.
+2. Tag and push:
 
    ```bash
    git tag v0.2.0
    git push origin v0.2.0
    ```
 
-3. The `Publish` workflow runs on the `v*` tag: it builds, typechecks, tests, verifies both `package.json` versions equal the tag, then publishes **`@coopkit/core` first, then `@coopkit/meetup`**.
-
-That order matters because `@coopkit/meetup` depends on `@coopkit/core`. Bun rewrites the `workspace:*` dependency to the concrete version (`0.2.0`) at publish time — npm cannot do this, which is why publishing uses `bun publish`.
+3. The `Publish` workflow builds, typechecks, tests, verifies both versions
+   equal the tag, then publishes both packages via Trusted Publishing.
 
 ## Dry run
 
-Use the **Run workflow** button (workflow_dispatch) on the Publish workflow with `dry_run` checked (the default). It packs and validates both packages with `bun publish --dry-run` — no registry writes, no token required.
+Use **Actions → Publish → Run workflow** with `dry_run` checked (the default).
+It runs `npm publish --dry-run` for both packages — no registry writes, no auth,
+and it works even before the bootstrap is done.
 
 ## Behavior notes
 
-- **Idempotent per package.** If a package's current version is already on the registry, it's skipped. So you can bump only `@coopkit/meetup`, re-tag, and the workflow republishes meetup while skipping the unchanged core.
-- **Prereleases.** A version containing a hyphen (e.g. `0.2.0-rc.1`) publishes under the npm `next` dist-tag instead of `latest`.
-- **Provenance.** Real publishes pass `--provenance` (requires the public repo + `id-token: write`, both configured). If you ever publish from a private repo, drop that flag.
-- **Gate.** The workflow won't publish unless build + typecheck + test all pass.
+- **Idempotent per package.** A package whose current version is already on the
+  registry is skipped — bump only one package, re-tag, and just that one
+  republishes.
+- **Prereleases.** A version with a hyphen (e.g. `0.2.0-rc.1`) publishes under
+  the npm `next` dist-tag instead of `latest`.
+- **Provenance** is attached automatically on real (non-dry-run) publishes.
+- **Gate.** Nothing publishes unless build + typecheck + test pass.
 
 ## Re-publishing the same version
 
-npm does not allow overwriting a published version. To ship a fix, bump the version and tag again.
+npm does not allow overwriting a published version. To ship a fix, bump the
+version and tag again.

@@ -17,7 +17,7 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write # required for npm provenance
+  id-token: write # required for npm Trusted Publishing (OIDC) + provenance
 
 jobs:
   publish:
@@ -30,6 +30,17 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.13"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -59,23 +70,16 @@ jobs:
             echo "  $dir OK ($PKG_VERSION)"
           done
 
-      - name: Configure npm auth
-        if: ${{ !inputs.dry_run }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN secret is not set."
-            exit 1
-          fi
-          printf 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$HOME/.npmrc"
-
       - name: Publish packages (core before meetup)
         env:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
+
+          # All packages share one version; internal @coopkit/* deps are pinned
+          # to it at publish time (npm doesn't understand the workspace: protocol).
+          RELEASE_VERSION=$(node -p "require('./packages/core/package.json').version")
+          echo "Release version: $RELEASE_VERSION"
 
           publish_pkg() {
             local dir="$1"
@@ -83,26 +87,38 @@ jobs:
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
 
-            # Prerelease versions (e.g. 0.2.0-rc.1) go under the `next` tag.
+            # Prereleases (e.g. 0.2.0-rc.1) go under the `next` tag, not `latest`.
             if [[ "$version" == *-* ]]; then dist_tag="next"; else dist_tag="latest"; fi
 
-            # Idempotent: skip a version that's already on the registry. Lets you
-            # bump only one package and re-run without a "version exists" failure.
+            # Idempotent: skip a version already on the registry, so you can bump
+            # one package and re-tag without a "version exists" failure.
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "::notice::$name@$version already published — skipping"
               return 0
             fi
 
-            local flags=(--access public --tag "$dist_tag")
-            if [ "${DRY_RUN:-false}" = "true" ]; then
-              flags+=(--dry-run)
-              echo "DRY RUN: $name@$version (tag: $dist_tag)"
-            else
-              flags+=(--provenance)
-              echo "Publishing $name@$version (tag: $dist_tag)"
-            fi
+            (
+              cd "$dir"
 
-            ( cd "$dir" && bun publish "${flags[@]}" )
+              # Rewrite workspace:* internal deps to the concrete release version.
+              node -p "Object.keys(require('./package.json').dependencies||{}).filter(d=>d.startsWith('@coopkit/')).join('\n')" \
+                | while IFS= read -r dep; do
+                    [ -n "$dep" ] || continue
+                    echo "  pinning $dep -> $RELEASE_VERSION"
+                    npm pkg set "dependencies.$dep=$RELEASE_VERSION"
+                  done
+
+              local flags=(--access public --tag "$dist_tag")
+              if [ "${DRY_RUN:-false}" = "true" ]; then
+                flags+=(--dry-run)
+                echo "DRY RUN: $name@$version (tag: $dist_tag)"
+              else
+                # Trusted Publishing supplies auth via OIDC and attaches provenance.
+                flags+=(--provenance)
+                echo "Publishing $name@$version (tag: $dist_tag) via Trusted Publishing"
+              fi
+              npm publish "${flags[@]}"
+            )
           }
 
           publish_pkg packages/core
