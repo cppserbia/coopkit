@@ -1,6 +1,6 @@
 {
   "name": "@coopkit/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared types for the coopkit toolkit: NormalizedEvent (platform-neutral input for automation packages) and EventFrontmatter (file-on-disk shape).",
   "license": "MIT",
   "repository": {

@@ -1,6 +1,6 @@
 {
   "name": "@coopkit/meetup",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Create Meetup.com Draft events from Markdown files in a Git repo. Library + CLI for the coopkit toolkit.",
   "license": "MIT",
   "repository": {
