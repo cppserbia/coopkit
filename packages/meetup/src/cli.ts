@@ -7,6 +7,28 @@ import { createMeetupDraft, createMeetupDraftFromFile } from "./create-event.js"
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
 
+/**
+ * Write the run result as a JSON object to `outputPath` (if given) so callers
+ * — notably GitHub Actions — can capture the created event's id/url. Keeps the
+ * package free of any Actions-specific coupling: it just emits JSON.
+ */
+function writeResultFile(
+  outputPath: string | undefined,
+  result: { status: string; eventId?: string; eventUrl?: string; photoAttached?: boolean }
+): void {
+  if (!outputPath) return;
+  const payload =
+    result.status === "created"
+      ? {
+          status: result.status,
+          eventId: result.eventId ?? "",
+          eventUrl: result.eventUrl ?? "",
+          photoAttached: result.photoAttached ?? false,
+        }
+      : { status: result.status };
+  fs.writeFileSync(outputPath, `${JSON.stringify(payload)}\n`);
+}
+
 const createCmd = defineCommand({
   meta: {
     name: "create",
@@ -28,6 +50,11 @@ const createCmd = defineCommand({
       type: "string",
       description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
     },
+    output: {
+      type: "string",
+      description:
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+    },
   },
   async run({ args }) {
     loadEnvFile();
@@ -38,6 +65,7 @@ const createCmd = defineCommand({
       venues: config.venues,
       dryRun: Boolean(args["dry-run"]),
     });
+    writeResultFile(args.output, result);
     if (result.status === "skipped") {
       process.exit(0);
     }
@@ -87,18 +115,24 @@ const createFromJsonCmd = defineCommand({
       type: "string",
       description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
     },
+    output: {
+      type: "string",
+      description:
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+    },
   },
   async run({ args }) {
     loadEnvFile();
     const config = loadMeetupConfig(args.config);
     const raw = args.file ? fs.readFileSync(args.file, "utf8") : readStdin();
     const event = parseNormalizedEvent(raw);
-    await createMeetupDraft({
+    const result = await createMeetupDraft({
       event,
       groupUrlname: config.groupUrlname,
       venues: config.venues,
       dryRun: Boolean(args["dry-run"]),
     });
+    writeResultFile(args.output, result);
   },
 });
 
