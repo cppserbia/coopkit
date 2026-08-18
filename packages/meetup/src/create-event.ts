@@ -149,6 +149,8 @@ export interface CreateMeetupDraftOptions {
   timezone?: string;
   /** Meetup member IDs to list as event hosts. */
   hosts?: number[];
+  /** Attach `event.speaker` as Meetup's Pro speaker profile. */
+  includeSpeaker?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -184,7 +186,15 @@ export async function createMeetupDraft(
     resolveVenue: (name) => resolveVenueId(name, options.venues),
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
+    ...(options.includeSpeaker !== undefined ? { includeSpeaker: options.includeSpeaker } : {}),
   });
+
+  if (options.includeSpeaker && !payload.speakerDetails) {
+    log(
+      "[warn] speakerDetails requested but not sent: the event has no speaker with a bio " +
+        "(Meetup requires a non-empty speaker description)."
+    );
+  }
 
   if (options.dryRun) {
     log(`--- DRY RUN: would create Meetup draft for ${options.event.id} ---`);
@@ -227,6 +237,8 @@ export interface CreateMeetupDraftFromFileOptions {
   timezone?: string;
   /** Meetup member IDs to list as event hosts. */
   hosts?: number[];
+  /** Attach `event.speaker` as Meetup's Pro speaker profile. */
+  includeSpeaker?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -272,6 +284,7 @@ export async function createMeetupDraftFromFile(
     venues: options.venues,
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
+    ...(options.includeSpeaker !== undefined ? { includeSpeaker: options.includeSpeaker } : {}),
     dryRun: options.dryRun,
     credentials: options.credentials,
     log,
@@ -287,7 +300,7 @@ export async function createMeetupDraftFromFile(
 export interface CreateMeetupDraftsOptions {
   event: NormalizedEvent;
   /** Groups to create the event in, in order, each with its own hosts. */
-  groups: Array<{ urlname: string; hosts?: number[] }>;
+  groups: Array<{ urlname: string; hosts?: number[]; includeSpeaker?: boolean }>;
   venues: VenueMap;
   /** IANA timezone of the groups. See `BuildPayloadInput.timezone`. */
   timezone?: string;
@@ -339,6 +352,7 @@ export async function createMeetupDrafts(
         venues: options.venues,
         ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
         ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
+        ...(group.includeSpeaker !== undefined ? { includeSpeaker: group.includeSpeaker } : {}),
         ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
         ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
         log,

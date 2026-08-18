@@ -154,6 +154,43 @@ the ones that worked.
 > reviewed or deleted on its own. Every account member must still have rights in
 > each target group — being a Pro network admin is not by itself enough.
 
+### Speaker profiles (Pro only)
+
+Meetup Pro events can carry a speaker profile. It comes from the event's
+`speaker`, and because non-Pro groups reject the field it is **opt-in**:
+
+```json
+"speakerDetails": true
+```
+
+or, when only some of your groups are in the network:
+
+```json
+"speakerDetails": ["chicago-c-cpp-users-group", "cpp-serbia"]
+```
+
+The mapping from `NormalizedEvent.speaker`:
+
+| Meetup field | Source | Notes |
+| --- | --- | --- |
+| `name` | `speaker.name` | Required by the API. |
+| `description` | `speaker.bioMarkdown` | Required by the API — see below. |
+| `socialNetworks` | `speaker.socialUrls` | Classified into Meetup's service enum. |
+| `photoId` | — | Not supported; needs a separate photo upload. |
+
+**A speaker with no bio is skipped, with a warning.** Meetup requires a
+non-empty `description`, and sending an empty string would publish a hollow
+profile, so `speakerDetails` is omitted entirely rather than half-filled. Give
+the speaker a `bioMarkdown` to have it appear.
+
+`socialUrls` are plain URLs — `NormalizedEvent` stays platform-neutral — and get
+classified by host into `LINKEDIN`, `TWITTER` (including `x.com`), `INSTAGRAM`,
+`FACEBOOK`, `TIKTOK`, `TUMBLR`, `FLICKR`, or `OTHER` for anything else such as a
+personal site. Entries that are not URLs are dropped rather than guessed at. The
+full URL is kept as the `identifier`: Meetup's name for the field suggests a bare
+handle, but the per-service shape is undocumented, and a URL is unambiguous and
+lossless for every service including `OTHER`.
+
 ### Hosts
 
 `eventHosts` takes Meetup **member IDs**, and the account must be a member of

@@ -27,6 +27,12 @@ export interface MeetupConfig {
    * single `defaultHosts` rarely fits all of them.
    */
   groupHosts?: Record<string, string[]>;
+  /**
+   * Attach the event's speaker as Meetup's speaker profile. This is a **Pro**
+   * feature and groups outside a Pro network reject it, so it is opt-in:
+   * `true` for every group, or a list of the group urlnames that support it.
+   */
+  speakerDetails?: boolean | string[];
 }
 
 export interface CoopkitConfig {
@@ -111,6 +117,17 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
       }
     }
   }
+  if (meetup.speakerDetails !== undefined) {
+    const sd = meetup.speakerDetails;
+    const ok =
+      typeof sd === "boolean" ||
+      (Array.isArray(sd) && sd.every((g) => typeof g === "string" && g !== ""));
+    if (!ok) {
+      throw new Error(
+        `${resolved}: meetup.speakerDetails must be true/false or an array of group urlnames.`
+      );
+    }
+  }
   if (meetup.defaultHosts !== undefined) {
     if (!Array.isArray(meetup.defaultHosts)) {
       throw new Error(
@@ -153,6 +170,16 @@ export function resolveHostIds(config: MeetupConfig, names?: string[]): number[]
 export interface GroupTarget {
   urlname: string;
   hosts: number[];
+  /** Whether this group accepts Meetup's Pro speaker profile. */
+  includeSpeaker: boolean;
+}
+
+/** Does this group opt into speakerDetails? See `MeetupConfig.speakerDetails`. */
+export function groupAcceptsSpeaker(config: MeetupConfig, urlname: string): boolean {
+  const sd = config.speakerDetails;
+  if (sd === undefined || sd === false) return false;
+  if (sd === true) return true;
+  return sd.some((g) => g.toLowerCase() === urlname.toLowerCase());
 }
 
 /**
@@ -201,6 +228,10 @@ export function resolveGroupTargets(
   return selected.map((urlname) => {
     const perGroup = hostsByGroup.get(urlname.toLowerCase());
     const names = perGroup ?? options.hostNames;
-    return { urlname, hosts: resolveHostIds(config, names) };
+    return {
+      urlname,
+      hosts: resolveHostIds(config, names),
+      includeSpeaker: groupAcceptsSpeaker(config, urlname),
+    };
   });
 }

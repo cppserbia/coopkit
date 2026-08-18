@@ -352,3 +352,53 @@ describe("resolveVenueId online support", () => {
     expect(resolveVenueId("Franklin Tap", { "Franklin Tap": 6500002 })).toBe(6500002);
   });
 });
+
+describe("buildCreateEventPayload speakerDetails", () => {
+  const resolveVenue = () => ONLINE_VENUE_ID;
+  const withSpeaker: NormalizedEvent = {
+    ...UTC_EVENT,
+    speaker: { name: "Andy Soffer", bioMarkdown: "A lapsed mathematician." },
+  };
+
+  it("omits speakerDetails unless the group opts in", () => {
+    const payload = buildCreateEventPayload({
+      event: withSpeaker,
+      groupUrlname: "g",
+      resolveVenue,
+    });
+    expect("speakerDetails" in payload).toBe(false);
+  });
+
+  it("includes speakerDetails when opted in", () => {
+    const payload = buildCreateEventPayload({
+      event: withSpeaker,
+      groupUrlname: "g",
+      resolveVenue,
+      includeSpeaker: true,
+    });
+    expect(payload.speakerDetails).toEqual({
+      name: "Andy Soffer",
+      description: "A lapsed mathematician.",
+    });
+  });
+
+  it("omits speakerDetails when opted in but the speaker has no bio", () => {
+    const payload = buildCreateEventPayload({
+      event: { ...UTC_EVENT, speaker: { name: "Andy Soffer" } },
+      groupUrlname: "g",
+      resolveVenue,
+      includeSpeaker: true,
+    });
+    expect("speakerDetails" in payload).toBe(false);
+  });
+
+  it("omits speakerDetails when opted in but there is no speaker at all", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue,
+      includeSpeaker: true,
+    });
+    expect("speakerDetails" in payload).toBe(false);
+  });
+});
