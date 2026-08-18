@@ -46,3 +46,6 @@ export type { CoopkitConfig, GroupTarget, MeetupConfig } from "./config.js";
 
 export { classifySocialUrl, speakerDetailsFrom } from "./speaker.js";
 export type { SocialNetworkService, SpeakerDetailsInput } from "./speaker.js";
+
+export { listGroups } from "./list-groups.js";
+export type { ListGroupsOptions, MeetupGroupInfo } from "./list-groups.js";

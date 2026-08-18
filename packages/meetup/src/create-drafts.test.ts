@@ -137,3 +137,41 @@ describe("multi-group --output status", () => {
     expect([...statuses]).toEqual(["dry-run"]);
   });
 });
+
+describe("per-group timezone produces one instant everywhere", () => {
+  it("renders 16:00Z as each group's own local wall time", async () => {
+    const { results } = await createMeetupDrafts({
+      event: EVENT, // 2026-08-22T16:00:00Z
+      groups: [
+        { urlname: "chicago-c-cpp-users-group", timezone: "America/Chicago" },
+        { urlname: "cpp-serbia", timezone: "Europe/Belgrade" },
+        { urlname: "CPPTORONTO", timezone: "America/Toronto" },
+      ],
+      venues: { ...VENUES },
+      dryRun: true,
+      log: () => {},
+    });
+
+    const starts = results.map((r) =>
+      r.ok && r.result.status === "dry-run" ? r.result.payload.startDateTime : undefined
+    );
+    // Same instant, three wall clocks: CDT -5, CEST +2, EDT -4.
+    expect(starts).toEqual(["2026-08-22T11:00:00", "2026-08-22T18:00:00", "2026-08-22T12:00:00"]);
+  });
+
+  it("falls back to the shared timezone for a group that names none", async () => {
+    const { results } = await createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "solo-group" }],
+      venues: { ...VENUES },
+      timezone: "America/Chicago",
+      dryRun: true,
+      log: () => {},
+    });
+    const payload =
+      results[0]?.ok && results[0].result.status === "dry-run"
+        ? results[0].result.payload
+        : undefined;
+    expect(payload?.startDateTime).toBe("2026-08-22T11:00:00");
+  });
+});

@@ -242,3 +242,84 @@ describe("speakerDetails gating", () => {
     ).toThrow(/speakerDetails must be true\/false or an array of group urlnames/);
   });
 });
+
+describe("per-group timezones", () => {
+  const NETWORK: MeetupConfig = {
+    groupUrlname: "chicago-c-cpp-users-group",
+    venues: { online: "online" },
+    groups: ["cpp-serbia", "CPPTORONTO"],
+    groupTimezones: {
+      "chicago-c-cpp-users-group": "America/Chicago",
+      "cpp-serbia": "Europe/Belgrade",
+      CPPTORONTO: "America/Toronto",
+    },
+  };
+
+  it("gives every group its own timezone", () => {
+    expect(resolveGroupTargets(NETWORK).map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", "America/Chicago"],
+      ["cpp-serbia", "Europe/Belgrade"],
+      ["CPPTORONTO", "America/Toronto"],
+    ]);
+  });
+
+  it("matches groupTimezones keys case-insensitively", () => {
+    const targets = resolveGroupTargets({
+      ...NETWORK,
+      groups: ["cpptoronto"],
+      groupTimezones: {
+        "chicago-c-cpp-users-group": "America/Chicago",
+        CPPTORONTO: "America/Toronto",
+      },
+    });
+    expect(targets.find((t) => t.urlname === "cpptoronto")?.timezone).toBe("America/Toronto");
+  });
+
+  it("refuses a multi-group run that has only one shared timezone", () => {
+    // The bug this guards: one wall time sent to groups in different zones is a
+    // different instant in each.
+    expect(() =>
+      resolveGroupTargets({
+        groupUrlname: "chicago-c-cpp-users-group",
+        venues: { online: "online" },
+        groups: ["cpp-serbia"],
+        timezone: "America/Chicago",
+      })
+    ).toThrow(/cannot describe a multi-group run/);
+  });
+
+  it("names the groups missing a timezone", () => {
+    expect(() =>
+      resolveGroupTargets({
+        ...NETWORK,
+        timezone: "America/Chicago",
+        groupTimezones: { "chicago-c-cpp-users-group": "America/Chicago" },
+      })
+    ).toThrow(/"cpp-serbia", "CPPTORONTO"/);
+  });
+
+  it("allows a single-group run with only the shared timezone", () => {
+    const targets = resolveGroupTargets({
+      groupUrlname: "solo-group",
+      venues: { online: "online" },
+      timezone: "America/Chicago",
+    });
+    expect(targets[0]?.timezone).toBe("America/Chicago");
+  });
+
+  it("allows a narrowed single-group run even when the config is multi-group", () => {
+    const targets = resolveGroupTargets(
+      { ...NETWORK, groupTimezones: undefined, timezone: "Europe/Belgrade" },
+      { only: ["cpp-serbia"] }
+    );
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["cpp-serbia", "Europe/Belgrade"],
+    ]);
+  });
+
+  it("rejects a malformed groupTimezones value", () => {
+    expect(() =>
+      loadMeetupConfig(writeConfig({ meetup: { ...BASE, groupTimezones: { "a-group": 5 } } }))
+    ).toThrow(/must be a non-empty IANA timezone string/);
+  });
+});

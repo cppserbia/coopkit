@@ -299,10 +299,20 @@ export async function createMeetupDraftFromFile(
 
 export interface CreateMeetupDraftsOptions {
   event: NormalizedEvent;
-  /** Groups to create the event in, in order, each with its own hosts. */
-  groups: Array<{ urlname: string; hosts?: number[]; includeSpeaker?: boolean }>;
+  /**
+   * Groups to create the event in, in order, each with its own hosts and its own
+   * timezone. The timezone must be per group: Meetup reads `startDateTime` as
+   * wall time in the *receiving* group's zone, so one shared wall time would put
+   * the event at a different instant in each group.
+   */
+  groups: Array<{
+    urlname: string;
+    hosts?: number[];
+    includeSpeaker?: boolean;
+    timezone?: string;
+  }>;
   venues: VenueMap;
-  /** IANA timezone of the groups. See `BuildPayloadInput.timezone`. */
+  /** Fallback IANA timezone for groups that name none. See `BuildPayloadInput.timezone`. */
   timezone?: string;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
@@ -350,7 +360,9 @@ export async function createMeetupDrafts(
         event: options.event,
         groupUrlname: group.urlname,
         venues: options.venues,
-        ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+        ...((group.timezone ?? options.timezone) !== undefined
+          ? { timezone: (group.timezone ?? options.timezone) as string }
+          : {}),
         ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
         ...(group.includeSpeaker !== undefined ? { includeSpeaker: group.includeSpeaker } : {}),
         ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
