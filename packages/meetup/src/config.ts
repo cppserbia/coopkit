@@ -33,6 +33,17 @@ export interface MeetupConfig {
    * `true` for every group, or a list of the group urlnames that support it.
    */
   speakerDetails?: boolean | string[];
+  /**
+   * Per-group IANA timezone, keyed by group urlname.
+   *
+   * **Required when targeting more than one group**, because Meetup has no
+   * single "event time": `startDateTime` is wall time in the *receiving group's*
+   * own zone. Sending one group's wall time to all of them creates a different
+   * instant in each — a session at 16:00Z becomes 11:00 in Chicago but also
+   * 11:00 in Belgrade, seven hours apart. Run `coopkit-meetup list-groups` to
+   * print a ready-to-paste map of what Meetup reports for each of your groups.
+   */
+  groupTimezones?: Record<string, string>;
 }
 
 export interface CoopkitConfig {
@@ -128,6 +139,21 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
       );
     }
   }
+  if (meetup.groupTimezones !== undefined) {
+    const tzs = meetup.groupTimezones;
+    if (typeof tzs !== "object" || tzs === null || Array.isArray(tzs)) {
+      throw new Error(
+        `${resolved}: meetup.groupTimezones must be an object mapping group urlnames to IANA timezones.`
+      );
+    }
+    for (const [group, tz] of Object.entries(tzs)) {
+      if (typeof tz !== "string" || tz === "") {
+        throw new Error(
+          `${resolved}: meetup.groupTimezones[${JSON.stringify(group)}] must be a non-empty IANA timezone string.`
+        );
+      }
+    }
+  }
   if (meetup.defaultHosts !== undefined) {
     if (!Array.isArray(meetup.defaultHosts)) {
       throw new Error(
@@ -172,6 +198,11 @@ export interface GroupTarget {
   hosts: number[];
   /** Whether this group accepts Meetup's Pro speaker profile. */
   includeSpeaker: boolean;
+  /**
+   * IANA timezone this group's wall time is expressed in. Undefined means the
+   * event date is already group-local wall time (the legacy reading).
+   */
+  timezone?: string;
 }
 
 /** Does this group opt into speakerDetails? See `MeetupConfig.speakerDetails`. */
@@ -225,13 +256,37 @@ export function resolveGroupTargets(
     Object.entries(config.groupHosts ?? {}).map(([g, names]) => [g.toLowerCase(), names])
   );
 
+  const tzByGroup = new Map(
+    Object.entries(config.groupTimezones ?? {}).map(([g, tz]) => [g.toLowerCase(), tz])
+  );
+
+  // One `timezone` shared across several groups is never right: Meetup reads
+  // startDateTime in the *receiving* group's zone, so the same wall time is a
+  // different instant per group. Refuse rather than silently placing it at the wrong time.
+  if (selected.length > 1 && config.timezone !== undefined) {
+    const unmapped = selected.filter((u) => !tzByGroup.has(u.toLowerCase()));
+    if (unmapped.length > 0) {
+      const missing = unmapped.map((u) => JSON.stringify(u)).join(", ");
+      throw new Error(
+        [
+          "meetup.timezone alone cannot describe a multi-group run: Meetup interprets",
+          "the event time in each group's own timezone, so one wall time would land at",
+          `a different instant in each. Add meetup.groupTimezones entries for ${missing}`,
+          "(run `coopkit-meetup list-groups` to print them).",
+        ].join(" ")
+      );
+    }
+  }
+
   return selected.map((urlname) => {
     const perGroup = hostsByGroup.get(urlname.toLowerCase());
     const names = perGroup ?? options.hostNames;
+    const timezone = tzByGroup.get(urlname.toLowerCase()) ?? config.timezone;
     return {
       urlname,
       hosts: resolveHostIds(config, names),
       includeSpeaker: groupAcceptsSpeaker(config, urlname),
+      ...(timezone !== undefined ? { timezone } : {}),
     };
   });
 }

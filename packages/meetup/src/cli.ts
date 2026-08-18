@@ -9,6 +9,7 @@ import {
   createMeetupDraftFromFile,
   createMeetupDrafts,
 } from "./create-event.js";
+import { listGroups } from "./list-groups.js";
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
 
@@ -123,15 +124,14 @@ const createCmd = defineCommand({
       eventFile: args.eventFile,
       groupUrlname: target.urlname,
       venues: config.venues,
-      ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      ...((target.timezone ?? config.timezone) !== undefined
+        ? { timezone: (target.timezone ?? config.timezone) as string }
+        : {}),
       ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
       includeSpeaker: target.includeSpeaker,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
-    if (result.status === "skipped") {
-      process.exit(0);
-    }
   },
 });
 
@@ -220,7 +220,9 @@ const createFromJsonCmd = defineCommand({
         event,
         groupUrlname: target.urlname,
         venues: config.venues,
-        ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+        ...((target.timezone ?? config.timezone) !== undefined
+          ? { timezone: (target.timezone ?? config.timezone) as string }
+          : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
         includeSpeaker: target.includeSpeaker,
         dryRun: Boolean(args["dry-run"]),
@@ -229,6 +231,8 @@ const createFromJsonCmd = defineCommand({
       return;
     }
 
+    // `targets` carry a per-group timezone; config.timezone stays only as the
+    // fallback for a single-group config that names no groupTimezones.
     const result = await createMeetupDrafts({
       event,
       groups: targets,
@@ -305,6 +309,42 @@ const listVenuesCmd = defineCommand({
   },
 });
 
+const listGroupsCmd = defineCommand({
+  meta: {
+    name: "list-groups",
+    description:
+      "Show each configured group's timezone and print a ready-to-paste groupTimezones map.",
+  },
+  args: {
+    config: {
+      type: "string",
+      description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
+    },
+  },
+  async run({ args }) {
+    loadEnvFile();
+    const config = loadMeetupConfig(args.config);
+    const urlnames = [config.groupUrlname, ...(config.groups ?? [])];
+    const groups = await listGroups({ urlnames });
+
+    for (const g of groups) {
+      console.error(`  ${g.urlname}  ${g.name ?? "(unreadable)"}  ${g.timezone ?? "(unknown)"}`);
+    }
+
+    const unknown = groups.filter((g) => !g.timezone).map((g) => g.urlname);
+    if (unknown.length > 0) {
+      console.error(
+        `\n[warn] No timezone for: ${unknown.join(", ")}. Check the urlname and that the account can read the group.`
+      );
+    }
+
+    console.error("\n--- Suggested `meetup.groupTimezones` for coopkit.config.json ---\n");
+    const map: Record<string, string> = {};
+    for (const g of groups) if (g.timezone) map[g.urlname] = g.timezone;
+    console.log(JSON.stringify({ groupTimezones: map }, null, 2));
+  },
+});
+
 const main = defineCommand({
   meta: {
     name: "coopkit-meetup",
@@ -314,7 +354,12 @@ const main = defineCommand({
     create: createCmd,
     "create-from-json": createFromJsonCmd,
     "list-venues": listVenuesCmd,
+    "list-groups": listGroupsCmd,
   },
 });
 
-runMain(main).then(() => process.exit(0));
+// Exit explicitly: the HTTP client uses global fetch, whose keep-alive sockets
+// keep the process alive for seconds after the last call, which reads as a hang
+// on CI. No argument, so a process.exitCode set by a handler (a partial
+// multi-group failure) survives instead of being overwritten with 0.
+runMain(main).then(() => process.exit());

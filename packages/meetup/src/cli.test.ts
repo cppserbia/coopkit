@@ -78,3 +78,80 @@ describe("create-from-json --output (dry-run)", () => {
     }
   });
 });
+
+// A multi-group config. Each group needs its own timezone, or resolveGroupTargets
+// refuses the run -- see "per-group timezones" in config.test.ts.
+const MULTI_CONFIG = JSON.stringify({
+  meetup: {
+    groupUrlname: "cpp-serbia",
+    groups: ["chicago-c-cpp-users-group"],
+    venues: { online: 42 },
+    groupTimezones: {
+      "cpp-serbia": "Europe/Belgrade",
+      "chicago-c-cpp-users-group": "America/Chicago",
+    },
+  },
+});
+
+/** Same event, but pointing at a venue key the config does not define. */
+const EVENT_BAD_VENUE = JSON.stringify({ ...JSON.parse(EVENT), venueKey: "nope" });
+
+describe("exit codes", () => {
+  it("exits 1 when a group in a multi-group run fails", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      writeFileSync(config, MULTI_CONFIG);
+      // An unknown venue throws inside the per-group try, so every group fails
+      // while the run itself completes -- no network, no credentials needed.
+      writeFileSync(event, EVENT_BAD_VENUE);
+
+      const { code } = await run([
+        "create-from-json",
+        "--groups",
+        "all",
+        "--dry-run",
+        "--config",
+        config,
+        "--output",
+        out,
+        event,
+      ]);
+
+      expect(code).toBe(1);
+      expect(JSON.parse(readFileSync(out, "utf8")).status).toBe("partial");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 0 when every group in a multi-group run succeeds", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      writeFileSync(config, MULTI_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code } = await run([
+        "create-from-json",
+        "--groups",
+        "all",
+        "--dry-run",
+        "--config",
+        config,
+        "--output",
+        out,
+        event,
+      ]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8")).status).toBe("dry-run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

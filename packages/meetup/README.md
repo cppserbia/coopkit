@@ -61,7 +61,8 @@ Drop a `coopkit.config.json` at the repo root:
 | --- | --- | --- |
 | `groupUrlname` | yes | Meetup group slug the drafts are created in. |
 | `venues` | yes | Maps frontmatter venue keys to Meetup venue IDs. |
-| `timezone` | no | IANA zone of the group. **Set this if your event dates are true UTC** — see below. |
+| `timezone` | no | IANA zone, for a **single**-group config. **Set this if your event dates are true UTC** — see below. |
+| `groupTimezones` | for multi-group | Per-group IANA zone. Required once more than one group is targeted. |
 | `hosts` | no | Named Meetup member IDs, so you can refer to hosts by name. |
 | `defaultHosts` | no | Names from `hosts` used when an event names none. |
 
@@ -102,9 +103,13 @@ in a network almost always have different organizers:
 {
   "meetup": {
     "groupUrlname": "chicago-c-cpp-users-group",
-    "timezone": "America/Chicago",
     "venues": { "online": "online" },
     "groups": ["cpp-serbia", "CPPTORONTO"],
+    "groupTimezones": {
+      "chicago-c-cpp-users-group": "America/Chicago",
+      "cpp-serbia": "Europe/Belgrade",
+      "CPPTORONTO": "America/Toronto"
+    },
     "hosts": { "Rob Douglas": 13296813, "Alex Smith": 256192100, "Jordan Lee": 274644230 },
     "groupHosts": {
       "chicago-c-cpp-users-group": ["Rob Douglas"],
@@ -118,6 +123,21 @@ in a network almost always have different organizers:
 `groupUrlname` is always the first target, then `groups` in order, de-duplicated
 case-insensitively (Meetup urlnames are case-insensitive, and a network may
 report `CPPTORONTO` where your config says `cpptoronto`).
+
+> **`groupTimezones` is required for a multi-group run, and this is not a style
+> preference.** Meetup has no single "event time": `startDateTime` is wall time in
+> the *receiving group's* own zone, with no offset accepted. Send one group's wall
+> time to every group and you create a **different instant in each** — a session at
+> 16:00Z becomes 11:00 in Chicago and also 11:00 in Belgrade, seven hours apart.
+> A multi-group run with only the shared `timezone` therefore **fails** rather than
+> silently placing it at the wrong time. Run `coopkit-meetup list-groups` to print the map:
+>
+> ```bash
+> bunx coopkit-meetup list-groups
+> ```
+>
+> `timezone` remains valid for a single-group config, and a narrowed run
+> (`--groups cpp-serbia`) still accepts it.
 
 ```bash
 # every group in the config
@@ -250,6 +270,16 @@ No writeback — the JSON path is for one-shot creation. Adopters who need bookk
 ```bash
 bunx coopkit-meetup list-venues
 ```
+
+### List groups (timezones)
+
+```bash
+bunx coopkit-meetup list-groups
+```
+
+Prints each configured group's name and the timezone Meetup holds for it, plus a
+ready-to-paste `groupTimezones` map. A group that cannot be read is listed with
+`(unknown)` and warned about rather than aborting the listing.
 
 ## Library API
 
