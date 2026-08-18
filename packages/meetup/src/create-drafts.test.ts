@@ -124,3 +124,16 @@ describe("createMeetupDrafts", () => {
     ).rejects.toThrow(/no groups/);
   });
 });
+
+describe("multi-group --output status", () => {
+  // Mirrors cli.ts's aggregateStatus contract: a dry run must never be
+  // reported as "created".
+  it("reports dry-run runs as dry-run, not created", async () => {
+    const { results } = await dryRunAcross([
+      { urlname: "chicago-c-cpp-users-group" },
+      { urlname: "cpp-serbia" },
+    ]);
+    const statuses = new Set(results.map((r) => (r.ok ? r.result.status : "failed")));
+    expect([...statuses]).toEqual(["dry-run"]);
+  });
+});

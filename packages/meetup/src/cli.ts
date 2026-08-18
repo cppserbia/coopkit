@@ -17,6 +17,17 @@ import { loadEnvFile } from "./load-env.js";
  * — notably GitHub Actions — can capture the created event's id/url. Keeps the
  * package free of any Actions-specific coupling: it just emits JSON.
  */
+/**
+ * Collapse per-group outcomes into one status: "partial" if any group failed,
+ * otherwise whatever the groups agree on ("dry-run" or "created"). Reporting a
+ * dry run as "created" would be a lie a caller might act on.
+ */
+function aggregateStatus(result: CreateMeetupDraftsResult): string {
+  if (result.results.some((r) => !r.ok)) return "partial";
+  const statuses = new Set(result.results.map((r) => (r.ok ? r.result.status : "failed")));
+  return statuses.size === 1 ? ([...statuses][0] ?? "created") : "mixed";
+}
+
 type SingleResult = {
   status: string;
   eventId?: string;
@@ -46,7 +57,7 @@ function writeResultFile(
   const payload =
     "results" in result
       ? {
-          status: result.results.every((r) => r.ok) ? "created" : "partial",
+          status: aggregateStatus(result),
           groups: result.results.map((r) =>
             r.ok
               ? { groupUrlname: r.groupUrlname, ok: true, ...summarizeSingle(r.result) }
