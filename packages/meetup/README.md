@@ -147,9 +147,10 @@ bunx coopkit-meetup create-from-json --groups all --dry-run event.json
 bunx coopkit-meetup create-from-json --groups "cpp-serbia,CPPTORONTO" event.json
 ```
 
-Without `--groups` only `groupUrlname` is used, and `--output` keeps its
-original single-event shape — so existing setups are unaffected. With
-`--groups`, `--output` gets a per-group breakdown instead:
+Both `create` and `create-from-json` take `--groups`. Without it only
+`groupUrlname` is used, and `--output` keeps its original single-event shape —
+so existing setups are unaffected. With `--groups`, `--output` gets a per-group
+breakdown instead:
 
 ```json
 {
@@ -164,8 +165,75 @@ original single-event shape — so existing setups are unaffected. With
 Groups are processed **sequentially**, and one group failing does not stop the
 others — every outcome is reported so you can retry just the failures. The exit
 code is 1 if any group failed. There is **no rollback**: drafts already created
-stay, so a retry needs the failed groups named explicitly or it will duplicate
-the ones that worked.
+stay. For `create-from-json` that makes a blind retry dangerous — it keeps no
+record, so it would duplicate the groups that worked unless you name the failed
+groups explicitly. The file-per-event path records what it created and is safe
+to re-run as-is:
+
+#### File-per-event (`create`)
+
+```bash
+bunx coopkit-meetup create --groups all events/2026-04-29-My-Event.md
+bunx coopkit-meetup create --groups "cpp-serbia,CPPTORONTO" events/2026-04-29-My-Event.md
+```
+
+`create` writes every group it created into the event file, so re-running it —
+or retrying after a partial failure — creates only what is missing:
+
+```yaml
+# before
+---
+title: Refactoring C++ Today
+date: 2026-08-22T16:00:00Z
+duration: PT1H30M
+venues:
+  - online
+---
+```
+
+```yaml
+# after `create --groups all`, with groupUrlname: cpp-serbia
+---
+title: Refactoring C++ Today
+date: 2026-08-22T16:00:00Z
+duration: PT1H30M
+venues:
+  - online
+event_url: 'https://www.meetup.com/cpp-serbia/events/313413133/'
+event_id: '313413133'
+meetup_events:
+  - group: cpp-serbia
+    event_id: '313413133'
+    event_url: 'https://www.meetup.com/cpp-serbia/events/313413133/'
+  - group: chicago-c-cpp-users-group
+    event_id: '314900001'
+    event_url: 'https://www.meetup.com/chicago-c-cpp-users-group/events/314900001/'
+---
+```
+
+The `meetup_events` contract:
+
+- One row per group the event exists in: `group`, `event_id` (a **string**, so a
+  large id round-trips through YAML byte-for-byte), and `event_url` when the API
+  reported one.
+- It is the **complete** record and includes the primary group. `event_url` /
+  `event_id` stay as a mirror of the primary group's row, for adopter sites and
+  workflows that read them. A secondary group's id is never written to those
+  scalars: that would make a later plain `create` skip the file and so never
+  create the primary event at all, and would point a site's "Register on Meetup"
+  link at the wrong group.
+- A group listed here is never created again. It is reported as
+  `{"ok": true, "status": "skipped", "reason": "…"}` in `--output` — `reason`
+  appears only in the per-group shape.
+- **No migration needed** for files written before `meetup_events` existed: the
+  group is read out of the legacy `event_url`, which already names it.
+- The file is written after **each** group, not once at the end, so a failure
+  halfway through still leaves the groups that succeeded recorded on disk.
+- A malformed hand-edited row (no `group`, a non-numeric `event_id`) is an
+  error, not a warning. Ignoring a typo would silently create a duplicate draft
+  — the exact failure the record exists to prevent.
+- When every requested group is already recorded, nothing is written at all, so
+  "the file did not change" keeps meaning "no work was done".
 
 > **Why not `proNetworkEvents`?** `CreateEventInput` has a `proNetworkEvents`
 > input that propagates one event across a network via a saved `filterId`. That
@@ -243,9 +311,14 @@ bunx coopkit-meetup create events/2026-04-29-My-Event.md
 
 # override the configured defaultHosts for one run
 bunx coopkit-meetup create --host "Rob Douglas" events/2026-04-29-My-Event.md
+
+# create the same event across a Pro network
+bunx coopkit-meetup create --groups all events/2026-04-29-My-Event.md
 ```
 
-Idempotent. Writes `event_url` + `event_id` back into the file's frontmatter on success.
+Idempotent. Writes `event_url` + `event_id` back into the file's frontmatter on
+success, and with `--groups` a `meetup_events` list that makes the idempotency
+per-group — see [Network events](#network-events-one-session-several-groups).
 
 ### From a JSON input (manual / form-driven)
 
@@ -337,6 +410,12 @@ jobs:
     uses: cppserbia/coopkit/.github/workflows/_meetup-event-draft.yml@main
     secrets: inherit
 ```
+
+> The workflow does **not** pass `--groups` yet. It decides whether the run did
+> any work by grepping `event_url` before and after, and a `--groups` run whose
+> primary group is already recorded changes only `meetup_events` — that
+> write-back would be discarded. Wiring `--groups` in needs that check replaced
+> with `git diff --quiet` first.
 
 ### `_meetup-event-manual.yml` — manually-triggered with a form
 

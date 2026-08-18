@@ -11,25 +11,38 @@ export type { VenueId, VenueMap } from "./venues.js";
 export {
   buildCreateEventPayload,
   buildCreateEventPayloadWithMap,
+  createdGroupEvents,
   detectContentType,
+  groupUrlnameFromEventUrl,
   isEventAlreadyCreated,
+  mergeCreatedGroupEvents,
   stripLeadingHeading,
   wallTimeInZone,
 } from "./payload.js";
-export type { BuildPayloadInput, CreateEventPayload } from "./payload.js";
+export type {
+  BuildPayloadInput,
+  CreateEventPayload,
+  CreatedEventBookkeeping,
+  CreatedGroupEventsOptions,
+} from "./payload.js";
 
 export {
   createMeetupDraft,
   createMeetupDraftFromFile,
   createMeetupDrafts,
+  createMeetupDraftsFromFile,
+  recordCreatedGroupEvent,
 } from "./create-event.js";
 export type {
   CreateMeetupDraftFromFileOptions,
   CreateMeetupDraftFromFileResult,
   CreateMeetupDraftOptions,
   CreateMeetupDraftResult,
+  CreateMeetupDraftsFromFileOptions,
+  CreateMeetupDraftsFromFileResult,
   CreateMeetupDraftsOptions,
   CreateMeetupDraftsResult,
+  RecordCreatedGroupEventInput,
 } from "./create-event.js";
 
 export { fetchAllVenues, formatVenueKey, listVenues } from "./list-venues.js";
