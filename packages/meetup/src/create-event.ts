@@ -4,19 +4,19 @@ import type { EventFrontmatter, NormalizedEvent } from "@coopkit/core";
 import { frontmatterToNormalizedEvent } from "@coopkit/core";
 import matter from "gray-matter";
 import {
-  createMeetupClient,
   MeetupApiError,
   type MeetupClient,
   type MeetupCredentials,
+  createMeetupClient,
 } from "./client.js";
 import {
-  buildCreateEventPayload,
   type CreateEventPayload,
+  buildCreateEventPayload,
   detectContentType,
   isEventAlreadyCreated,
   stripLeadingHeading,
 } from "./payload.js";
-import { resolveVenueId, type VenueMap } from "./venues.js";
+import { type VenueMap, resolveVenueId } from "./venues.js";
 
 const CREATE_EVENT_MUTATION = `
   mutation CreateDraftEvent($input: CreateEventInput!) {
@@ -145,6 +145,10 @@ export interface CreateMeetupDraftOptions {
   event: NormalizedEvent;
   groupUrlname: string;
   venues: VenueMap;
+  /** IANA timezone of the group. See `BuildPayloadInput.timezone`. */
+  timezone?: string;
+  /** Meetup member IDs to list as event hosts. */
+  hosts?: number[];
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -178,6 +182,8 @@ export async function createMeetupDraft(
     event: options.event,
     groupUrlname: options.groupUrlname,
     resolveVenue: (name) => resolveVenueId(name, options.venues),
+    ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+    ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
   });
 
   if (options.dryRun) {
@@ -217,6 +223,10 @@ export interface CreateMeetupDraftFromFileOptions {
   eventFile: string;
   groupUrlname: string;
   venues: VenueMap;
+  /** IANA timezone of the group. See `BuildPayloadInput.timezone`. */
+  timezone?: string;
+  /** Meetup member IDs to list as event hosts. */
+  hosts?: number[];
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -260,6 +270,8 @@ export async function createMeetupDraftFromFile(
     event,
     groupUrlname: options.groupUrlname,
     venues: options.venues,
+    ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+    ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
     dryRun: options.dryRun,
     credentials: options.credentials,
     log,

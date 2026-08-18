@@ -5,6 +5,16 @@ import type { VenueMap } from "./venues.js";
 export interface MeetupConfig {
   groupUrlname: string;
   venues: VenueMap;
+  /**
+   * IANA timezone of the group (e.g. "America/Chicago"). Set this when your
+   * event dates are true UTC instants; see `BuildPayloadInput.timezone` for
+   * why omitting it means "the date is already local wall time".
+   */
+  timezone?: string;
+  /** Named Meetup member IDs, so config and CLI can refer to people by name. */
+  hosts?: Record<string, number>;
+  /** Names from `hosts` to list as event hosts when an event names none itself. */
+  defaultHosts?: string[];
 }
 
 export interface CoopkitConfig {
@@ -45,5 +55,55 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
   if (!meetup.venues || typeof meetup.venues !== "object") {
     throw new Error(`${resolved}: meetup.venues must be an object mapping venue names to IDs.`);
   }
+  if (meetup.timezone !== undefined && typeof meetup.timezone !== "string") {
+    throw new Error(`${resolved}: meetup.timezone must be an IANA timezone string.`);
+  }
+  if (meetup.hosts !== undefined) {
+    if (typeof meetup.hosts !== "object" || meetup.hosts === null) {
+      throw new Error(`${resolved}: meetup.hosts must be an object mapping names to member IDs.`);
+    }
+    for (const [name, id] of Object.entries(meetup.hosts)) {
+      if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) {
+        throw new Error(
+          `${resolved}: meetup.hosts[${JSON.stringify(name)}] must be a positive integer Meetup member ID (got ${JSON.stringify(id)}).`
+        );
+      }
+    }
+  }
+  if (meetup.defaultHosts !== undefined) {
+    if (!Array.isArray(meetup.defaultHosts)) {
+      throw new Error(
+        `${resolved}: meetup.defaultHosts must be an array of names from meetup.hosts.`
+      );
+    }
+    // Fail here rather than at call time: a typo'd name would otherwise
+    // silently create the event with no host at all.
+    for (const name of meetup.defaultHosts) {
+      if (typeof name !== "string" || !meetup.hosts || !(name in meetup.hosts)) {
+        throw new Error(
+          `${resolved}: meetup.defaultHosts entry ${JSON.stringify(name)} is not a key of meetup.hosts.`
+        );
+      }
+    }
+  }
   return meetup;
+}
+
+/**
+ * Resolve host names to Meetup member IDs, falling back to `defaultHosts`.
+ * Returns [] when neither is configured, which leaves `eventHosts` off the
+ * payload entirely (Meetup then defaults to the creating organizer).
+ */
+export function resolveHostIds(config: MeetupConfig, names?: string[]): number[] {
+  const wanted = names && names.length > 0 ? names : (config.defaultHosts ?? []);
+  return wanted.map((name) => {
+    const id = config.hosts?.[name];
+    if (id === undefined) {
+      const known = Object.keys(config.hosts ?? {});
+      const suffix =
+        known.length > 0 ? ` Known hosts: ${known.map((k) => JSON.stringify(k)).join(", ")}.` : "";
+      throw new Error(`Unknown host ${JSON.stringify(name)}. Add it to meetup.hosts.${suffix}`);
+    }
+    return id;
+  });
 }
