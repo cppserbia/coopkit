@@ -1,4 +1,5 @@
 import type { NormalizedEvent } from "@coopkit/core";
+import { type SpeakerDetailsInput, speakerDetailsFrom } from "./speaker.js";
 import { type VenueId, type VenueMap, resolveVenueId } from "./venues.js";
 
 export interface CreateEventPayload {
@@ -11,6 +12,8 @@ export interface CreateEventPayload {
   publishStatus: "DRAFT";
   /** Meetup member IDs to list as event hosts. Omitted when none are configured. */
   eventHosts?: number[];
+  /** Pro-only speaker profile. Omitted unless the group opts in and a bio exists. */
+  speakerDetails?: SpeakerDetailsInput;
 }
 
 export interface BuildPayloadInput {
@@ -38,6 +41,11 @@ export interface BuildPayloadInput {
   timezone?: string;
   /** Meetup member IDs to list as event hosts. */
   hosts?: number[];
+  /**
+   * Attach `event.speaker` as Meetup's Pro speaker profile. Off by default:
+   * `speakerDetails` is a Pro-network feature and other groups reject it.
+   */
+  includeSpeaker?: boolean;
 }
 
 const PLACEHOLDER_RE = /^<.*>$/;
@@ -122,6 +130,10 @@ export function buildCreateEventPayload(input: BuildPayloadInput): CreateEventPa
   if (input.hosts && input.hosts.length > 0) {
     payload.eventHosts = [...input.hosts];
   }
+  if (input.includeSpeaker) {
+    const speakerDetails = speakerDetailsFrom(event.speaker);
+    if (speakerDetails) payload.speakerDetails = speakerDetails;
+  }
   return payload;
 }
 
@@ -133,7 +145,7 @@ export function buildCreateEventPayloadWithMap(
   event: NormalizedEvent,
   groupUrlname: string,
   venues: VenueMap,
-  options: { timezone?: string; hosts?: number[] } = {}
+  options: { timezone?: string; hosts?: number[]; includeSpeaker?: boolean } = {}
 ): CreateEventPayload {
   return buildCreateEventPayload({
     event,

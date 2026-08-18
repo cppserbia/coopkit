@@ -37,8 +37,12 @@ export type { ListVenuesOptions, MeetupVenue } from "./list-venues.js";
 
 export {
   DEFAULT_CONFIG_FILENAME,
+  groupAcceptsSpeaker,
   loadMeetupConfig,
   resolveGroupTargets,
   resolveHostIds,
 } from "./config.js";
 export type { CoopkitConfig, GroupTarget, MeetupConfig } from "./config.js";
+
+export { classifySocialUrl, speakerDetailsFrom } from "./speaker.js";
+export type { SocialNetworkService, SpeakerDetailsInput } from "./speaker.js";

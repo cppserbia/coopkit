@@ -69,4 +69,10 @@ export interface NormalizedSpeaker {
   avatarUrl?: string;
   /** Speaker bio in Markdown. */
   bioMarkdown?: string;
+  /**
+   * Links to the speaker's profiles — a personal site, LinkedIn, Mastodon,
+   * anything. Kept as plain URLs because this contract is platform-neutral;
+   * packages that publish speaker profiles classify them as needed.
+   */
+  socialUrls?: string[];
 }

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   type MeetupConfig,
+  groupAcceptsSpeaker,
   loadMeetupConfig,
   resolveGroupTargets,
   resolveHostIds,
@@ -191,11 +192,53 @@ describe("resolveGroupTargets", () => {
       groupUrlname: "solo-group",
       venues: { online: "online" },
     });
-    expect(targets).toEqual([{ urlname: "solo-group", hosts: [] }]);
+    expect(targets).toEqual([{ urlname: "solo-group", hosts: [], includeSpeaker: false }]);
   });
 
   it("lets an explicit hostNames override apply to groups without a groupHosts entry", () => {
     const targets = resolveGroupTargets({ ...cfg, groupHosts: {} }, { hostNames: ["Alex Smith"] });
     expect(targets.every((t) => t.hosts[0] === 256192100)).toBe(true);
+  });
+});
+
+describe("speakerDetails gating", () => {
+  const base: MeetupConfig = { groupUrlname: "a-group", venues: { online: "online" } };
+
+  it("is off when unset", () => {
+    expect(groupAcceptsSpeaker(base, "a-group")).toBe(false);
+  });
+
+  it("is off when explicitly false", () => {
+    expect(groupAcceptsSpeaker({ ...base, speakerDetails: false }, "a-group")).toBe(false);
+  });
+
+  it("is on for every group when true", () => {
+    const cfg = { ...base, speakerDetails: true };
+    expect(groupAcceptsSpeaker(cfg, "a-group")).toBe(true);
+    expect(groupAcceptsSpeaker(cfg, "anything-else")).toBe(true);
+  });
+
+  it("is on only for listed groups, case-insensitively", () => {
+    const cfg = { ...base, speakerDetails: ["CPPTORONTO"] };
+    expect(groupAcceptsSpeaker(cfg, "cpptoronto")).toBe(true);
+    expect(groupAcceptsSpeaker(cfg, "cpp-serbia")).toBe(false);
+  });
+
+  it("flows onto resolved group targets", () => {
+    const targets = resolveGroupTargets({
+      ...base,
+      groups: ["b-group"],
+      speakerDetails: ["b-group"],
+    });
+    expect(targets.map((t) => [t.urlname, t.includeSpeaker])).toEqual([
+      ["a-group", false],
+      ["b-group", true],
+    ]);
+  });
+
+  it("rejects a malformed speakerDetails value", () => {
+    expect(() =>
+      loadMeetupConfig(writeConfig({ meetup: { ...BASE, speakerDetails: 42 } }))
+    ).toThrow(/speakerDetails must be true\/false or an array of group urlnames/);
   });
 });

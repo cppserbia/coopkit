@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";
-import { loadMeetupConfig, resolveGroupTargets, resolveHostIds } from "./config.js";
+import { loadMeetupConfig, resolveGroupTargets } from "./config.js";
 import {
   type CreateMeetupDraftsResult,
   createMeetupDraft,
@@ -113,13 +113,19 @@ const createCmd = defineCommand({
   async run({ args }) {
     loadEnvFile();
     const config = loadMeetupConfig(args.config);
-    const hosts = resolveHostIds(config, parseHostArg(args.host));
+    const hostNames = parseHostArg(args.host);
+    const [target] = resolveGroupTargets(config, {
+      only: [config.groupUrlname],
+      ...(hostNames !== undefined ? { hostNames } : {}),
+    });
+    if (!target) throw new Error("No group resolved from the config.");
     const result = await createMeetupDraftFromFile({
       eventFile: args.eventFile,
-      groupUrlname: config.groupUrlname,
+      groupUrlname: target.urlname,
       venues: config.venues,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
-      ...(hosts.length > 0 ? { hosts } : {}),
+      ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
+      includeSpeaker: target.includeSpeaker,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
@@ -216,6 +222,7 @@ const createFromJsonCmd = defineCommand({
         venues: config.venues,
         ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
+        includeSpeaker: target.includeSpeaker,
         dryRun: Boolean(args["dry-run"]),
       });
       writeResultFile(args.output, result);
