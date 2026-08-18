@@ -5,8 +5,8 @@ export type {
   MeetupGraphQLError,
 } from "./client.js";
 
-export { resolveVenueId } from "./venues.js";
-export type { VenueMap } from "./venues.js";
+export { ONLINE_VENUE_ID, resolveVenueId } from "./venues.js";
+export type { VenueId, VenueMap } from "./venues.js";
 
 export {
   buildCreateEventPayload,
@@ -14,6 +14,7 @@ export {
   detectContentType,
   isEventAlreadyCreated,
   stripLeadingHeading,
+  wallTimeInZone,
 } from "./payload.js";
 export type { BuildPayloadInput, CreateEventPayload } from "./payload.js";
 
@@ -28,5 +29,5 @@ export type {
 export { fetchAllVenues, formatVenueKey, listVenues } from "./list-venues.js";
 export type { ListVenuesOptions, MeetupVenue } from "./list-venues.js";
 
-export { DEFAULT_CONFIG_FILENAME, loadMeetupConfig } from "./config.js";
+export { DEFAULT_CONFIG_FILENAME, loadMeetupConfig, resolveHostIds } from "./config.js";
 export type { CoopkitConfig, MeetupConfig } from "./config.js";

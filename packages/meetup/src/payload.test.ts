@@ -5,8 +5,9 @@ import {
   detectContentType,
   isEventAlreadyCreated,
   stripLeadingHeading,
+  wallTimeInZone,
 } from "./payload.js";
-import { resolveVenueId } from "./venues.js";
+import { ONLINE_VENUE_ID, resolveVenueId } from "./venues.js";
 
 describe("stripLeadingHeading", () => {
   it("removes a leading '# Title' line", () => {
@@ -210,5 +211,144 @@ describe("detectContentType", () => {
 
   it("defaults to JPEG for unknown types", () => {
     expect(detectContentType("application/octet-stream")).toBe("JPEG");
+  });
+});
+
+// A true-UTC instant: 16:00Z is 11:00 in Chicago (CDT, UTC-5) on this date.
+const UTC_EVENT: NormalizedEvent = {
+  id: "2026-08-22-andy-soffer",
+  title: "Refactoring C++ Today",
+  date: new Date("2026-08-22T16:00:00Z"),
+  duration: "PT1H",
+  venueKey: "online",
+  description: "A pragmatic survey.",
+};
+
+describe("wallTimeInZone", () => {
+  it("converts a UTC instant to wall time in the target zone", () => {
+    expect(wallTimeInZone(new Date("2026-08-22T16:00:00Z"), "America/Chicago")).toBe(
+      "2026-08-22T11:00:00"
+    );
+  });
+
+  it("handles a zone ahead of UTC", () => {
+    expect(wallTimeInZone(new Date("2026-08-14T16:00:00Z"), "Europe/Belgrade")).toBe(
+      "2026-08-14T18:00:00"
+    );
+  });
+
+  it("rolls the date back when the local day differs from the UTC day", () => {
+    // 02:00Z on the 23rd is still 21:00 on the 22nd in Chicago.
+    expect(wallTimeInZone(new Date("2026-08-23T02:00:00Z"), "America/Chicago")).toBe(
+      "2026-08-22T21:00:00"
+    );
+  });
+
+  it("renders midnight as 00, not 24", () => {
+    expect(wallTimeInZone(new Date("2026-08-22T05:00:00Z"), "America/Chicago")).toBe(
+      "2026-08-22T00:00:00"
+    );
+  });
+
+  it("respects the zone's DST offset for the given date", () => {
+    // Chicago is UTC-6 (CST) in January, UTC-5 (CDT) in August.
+    expect(wallTimeInZone(new Date("2026-01-17T17:00:00Z"), "America/Chicago")).toBe(
+      "2026-01-17T11:00:00"
+    );
+  });
+
+  it("throws a helpful error on an invalid timezone", () => {
+    expect(() => wallTimeInZone(new Date(), "Not/AZone")).toThrow(/Invalid timezone/);
+  });
+});
+
+describe("buildCreateEventPayload timezone handling", () => {
+  const resolveVenue = () => ONLINE_VENUE_ID;
+
+  it("treats the date as group-local wall time when no timezone is set (legacy)", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "chicago-c-cpp-users-group",
+      resolveVenue,
+    });
+    expect(payload.startDateTime).toBe("2026-08-22T16:00:00");
+  });
+
+  it("converts a true-UTC date into group-local wall time when a timezone is set", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "chicago-c-cpp-users-group",
+      resolveVenue,
+      timezone: "America/Chicago",
+    });
+    expect(payload.startDateTime).toBe("2026-08-22T11:00:00");
+  });
+});
+
+describe("buildCreateEventPayload hosts", () => {
+  const resolveVenue = () => ONLINE_VENUE_ID;
+
+  it("omits eventHosts entirely when no hosts are given", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue,
+    });
+    expect("eventHosts" in payload).toBe(false);
+  });
+
+  it("omits eventHosts when the list is empty", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue,
+      hosts: [],
+    });
+    expect("eventHosts" in payload).toBe(false);
+  });
+
+  it("passes member IDs through as eventHosts", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue,
+      hosts: [13296813, 256192100],
+    });
+    expect(payload.eventHosts).toEqual([13296813, 256192100]);
+  });
+
+  it("does not alias the caller's array", () => {
+    const hosts = [13296813];
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue,
+      hosts,
+    });
+    hosts.push(999);
+    expect(payload.eventHosts).toEqual([13296813]);
+  });
+});
+
+describe("resolveVenueId online support", () => {
+  it("returns the online sentinel unchanged", () => {
+    expect(resolveVenueId("online", { online: ONLINE_VENUE_ID })).toBe("online");
+  });
+
+  it("serializes the sentinel into venueId", () => {
+    const payload = buildCreateEventPayload({
+      event: UTC_EVENT,
+      groupUrlname: "g",
+      resolveVenue: (name) => resolveVenueId(name, { online: ONLINE_VENUE_ID }),
+    });
+    expect(payload.venueId).toBe("online");
+  });
+
+  it("still rejects a placeholder numeric ID", () => {
+    expect(() => resolveVenueId("bad", { bad: 0 })).toThrow(/placeholder ID/);
+  });
+
+  it("still resolves a real numeric ID", () => {
+    expect(resolveVenueId("Franklin Tap", { "Franklin Tap": 6500002 })).toBe(6500002);
   });
 });

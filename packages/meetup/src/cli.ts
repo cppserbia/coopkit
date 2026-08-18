@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";
-import { loadMeetupConfig } from "./config.js";
+import { loadMeetupConfig, resolveHostIds } from "./config.js";
 import { createMeetupDraft, createMeetupDraftFromFile } from "./create-event.js";
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
@@ -29,6 +29,15 @@ function writeResultFile(
   fs.writeFileSync(outputPath, `${JSON.stringify(payload)}\n`);
 }
 
+/** Split a `--host "A,B"` value into trimmed names. */
+function parseHostArg(value: unknown): string[] | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
 const createCmd = defineCommand({
   meta: {
     name: "create",
@@ -50,6 +59,11 @@ const createCmd = defineCommand({
       type: "string",
       description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
     },
+    host: {
+      type: "string",
+      description:
+        "Host name(s) from meetup.hosts, comma-separated. Defaults to meetup.defaultHosts.",
+    },
     output: {
       type: "string",
       description:
@@ -59,10 +73,13 @@ const createCmd = defineCommand({
   async run({ args }) {
     loadEnvFile();
     const config = loadMeetupConfig(args.config);
+    const hosts = resolveHostIds(config, parseHostArg(args.host));
     const result = await createMeetupDraftFromFile({
       eventFile: args.eventFile,
       groupUrlname: config.groupUrlname,
       venues: config.venues,
+      ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      ...(hosts.length > 0 ? { hosts } : {}),
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
@@ -115,6 +132,11 @@ const createFromJsonCmd = defineCommand({
       type: "string",
       description: "Path to coopkit.config.json (default: ./coopkit.config.json).",
     },
+    host: {
+      type: "string",
+      description:
+        "Host name(s) from meetup.hosts, comma-separated. Defaults to meetup.defaultHosts.",
+    },
     output: {
       type: "string",
       description:
@@ -126,10 +148,13 @@ const createFromJsonCmd = defineCommand({
     const config = loadMeetupConfig(args.config);
     const raw = args.file ? fs.readFileSync(args.file, "utf8") : readStdin();
     const event = parseNormalizedEvent(raw);
+    const hosts = resolveHostIds(config, parseHostArg(args.host));
     const result = await createMeetupDraft({
       event,
       groupUrlname: config.groupUrlname,
       venues: config.venues,
+      ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      ...(hosts.length > 0 ? { hosts } : {}),
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);

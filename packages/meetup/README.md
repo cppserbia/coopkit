@@ -44,12 +44,66 @@ Drop a `coopkit.config.json` at the repo root:
 {
   "meetup": {
     "groupUrlname": "your-group-slug",
+    "timezone": "America/Chicago",
     "venues": {
       "Venue Name, City, cc": 12345678,
-      "online": 23456789
-    }
+      "online": "online"
+    },
+    "hosts": {
+      "Rob Douglas": 13296813
+    },
+    "defaultHosts": ["Rob Douglas"]
   }
 }
+```
+
+| Key | Required | Purpose |
+| --- | --- | --- |
+| `groupUrlname` | yes | Meetup group slug the drafts are created in. |
+| `venues` | yes | Maps frontmatter venue keys to Meetup venue IDs. |
+| `timezone` | no | IANA zone of the group. **Set this if your event dates are true UTC** — see below. |
+| `hosts` | no | Named Meetup member IDs, so you can refer to hosts by name. |
+| `defaultHosts` | no | Names from `hosts` used when an event names none. |
+
+### Online events
+
+Meetup has no venue record for an online event, so `list-venues` will never
+return one. Use the literal string `"online"` as the venue ID:
+
+```json
+"venues": { "online": "online" }
+```
+
+### Timezones — read this if your dates are UTC
+
+Meetup interprets `startDateTime` as **wall time in the group's own timezone**;
+the API accepts no offset. So `event.date` has two possible readings, and the
+`timezone` key picks which one you mean:
+
+- **`timezone` set** — `event.date` is a true instant and gets converted to wall
+  time in that zone. `date: 2026-08-22T16:00:00Z` with
+  `"timezone": "America/Chicago"` creates an **11:00** event. DST is handled per
+  date.
+- **`timezone` omitted** — `event.date`'s UTC clock reading is used verbatim, so
+  `2026-08-14T18:00:00Z` creates an **18:00** local event. This is the original
+  behaviour and stays the default, because some adopters store local wall time
+  with a nominal `Z` suffix.
+
+Omitting `timezone` when your dates really are UTC silently shifts every event
+by the zone's offset, so set it whenever your source stores real instants.
+
+### Hosts
+
+`eventHosts` takes Meetup **member IDs**, and the account must be a member of
+the group. Name them in `hosts` and select them per run with `--host`, or set
+`defaultHosts` to apply the same host every time. When no host is resolved the
+key is omitted from the payload entirely and Meetup falls back to the creating
+organizer.
+
+To find a member ID, query the group's organizer:
+
+```graphql
+query { groupByUrlname(urlname: "your-group-slug") { organizer { id name } } }
 ```
 
 Discover venue IDs:
@@ -67,6 +121,9 @@ bunx coopkit-meetup list-venues --group your-group-slug
 ```bash
 bunx coopkit-meetup create --dry-run events/2026-04-29-My-Event.md
 bunx coopkit-meetup create events/2026-04-29-My-Event.md
+
+# override the configured defaultHosts for one run
+bunx coopkit-meetup create --host "Rob Douglas" events/2026-04-29-My-Event.md
 ```
 
 Idempotent. Writes `event_url` + `event_id` back into the file's frontmatter on success.
