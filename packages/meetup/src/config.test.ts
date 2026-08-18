@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type MeetupConfig, loadMeetupConfig, resolveHostIds } from "./config.js";
+import {
+  type MeetupConfig,
+  loadMeetupConfig,
+  resolveGroupTargets,
+  resolveHostIds,
+} from "./config.js";
 
 function writeConfig(contents: unknown): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coopkit-config-"));
@@ -87,5 +92,110 @@ describe("resolveHostIds", () => {
   it("throws on an unknown name and lists the known ones", () => {
     expect(() => resolveHostIds(cfg, ["Nobody"])).toThrow(/Unknown host "Nobody"/);
     expect(() => resolveHostIds(cfg, ["Nobody"])).toThrow(/Known hosts: "Rob Douglas"/);
+  });
+});
+
+describe("loadMeetupConfig groups/groupHosts", () => {
+  it("loads groups and groupHosts", () => {
+    const cfg = loadMeetupConfig(
+      writeConfig({
+        meetup: {
+          ...BASE,
+          hosts: { "Rob Douglas": 13296813 },
+          groups: ["cpp-serbia"],
+          groupHosts: { "chicago-c-cpp-users-group": ["Rob Douglas"] },
+        },
+      })
+    );
+    expect(cfg.groups).toEqual(["cpp-serbia"]);
+    expect(cfg.groupHosts).toEqual({ "chicago-c-cpp-users-group": ["Rob Douglas"] });
+  });
+
+  it("rejects a non-array groups", () => {
+    expect(() => loadMeetupConfig(writeConfig({ meetup: { ...BASE, groups: "a" } }))).toThrow(
+      /meetup.groups must be an array/
+    );
+  });
+
+  it("rejects a groupHosts name that is not in hosts", () => {
+    expect(() =>
+      loadMeetupConfig(
+        writeConfig({
+          meetup: { ...BASE, hosts: { Rob: 1 }, groupHosts: { "some-group": ["Nope"] } },
+        })
+      )
+    ).toThrow(/groupHosts\["some-group"\] entry "Nope" is not a key of meetup.hosts/);
+  });
+});
+
+describe("resolveGroupTargets", () => {
+  const cfg: MeetupConfig = {
+    groupUrlname: "chicago-c-cpp-users-group",
+    venues: { online: "online" },
+    hosts: { "Rob Douglas": 13296813, "Alex Smith": 256192100, "Jordan Lee": 274644230 },
+    defaultHosts: ["Rob Douglas"],
+    groups: ["cpp-serbia", "CPPTORONTO"],
+    groupHosts: {
+      "chicago-c-cpp-users-group": ["Rob Douglas"],
+      "cpp-serbia": ["Alex Smith"],
+      cpptoronto: ["Jordan Lee"],
+    },
+  };
+
+  it("puts groupUrlname first, then groups in order", () => {
+    expect(resolveGroupTargets(cfg).map((t) => t.urlname)).toEqual([
+      "chicago-c-cpp-users-group",
+      "cpp-serbia",
+      "CPPTORONTO",
+    ]);
+  });
+
+  it("resolves per-group hosts, matching keys case-insensitively", () => {
+    const targets = resolveGroupTargets(cfg);
+    expect(targets.map((t) => t.hosts)).toEqual([[13296813], [256192100], [274644230]]);
+  });
+
+  it("falls back to defaultHosts for a group with no override", () => {
+    const targets = resolveGroupTargets({ ...cfg, groupHosts: {} });
+    expect(targets.every((t) => t.hosts[0] === 13296813)).toBe(true);
+  });
+
+  it("de-duplicates groupUrlname repeated in groups, case-insensitively", () => {
+    const targets = resolveGroupTargets({
+      ...cfg,
+      groups: ["CHICAGO-C-CPP-USERS-GROUP", "cpp-serbia"],
+    });
+    expect(targets.map((t) => t.urlname)).toEqual(["chicago-c-cpp-users-group", "cpp-serbia"]);
+  });
+
+  it("narrows to the requested groups", () => {
+    expect(resolveGroupTargets(cfg, { only: ["cpp-serbia"] }).map((t) => t.urlname)).toEqual([
+      "cpp-serbia",
+    ]);
+  });
+
+  it("matches the `only` filter case-insensitively", () => {
+    expect(resolveGroupTargets(cfg, { only: ["cpptoronto"] }).map((t) => t.urlname)).toEqual([
+      "CPPTORONTO",
+    ]);
+  });
+
+  it("throws when a requested group is not in the config", () => {
+    expect(() => resolveGroupTargets(cfg, { only: ["winnipeg-cpp"] })).toThrow(
+      /"winnipeg-cpp" are not in this config/
+    );
+  });
+
+  it("returns just the one group when no groups list is configured", () => {
+    const targets = resolveGroupTargets({
+      groupUrlname: "solo-group",
+      venues: { online: "online" },
+    });
+    expect(targets).toEqual([{ urlname: "solo-group", hosts: [] }]);
+  });
+
+  it("lets an explicit hostNames override apply to groups without a groupHosts entry", () => {
+    const targets = resolveGroupTargets({ ...cfg, groupHosts: {} }, { hostNames: ["Alex Smith"] });
+    expect(targets.every((t) => t.hosts[0] === 256192100)).toBe(true);
   });
 });
