@@ -18,16 +18,27 @@ export {
 } from "./payload.js";
 export type { BuildPayloadInput, CreateEventPayload } from "./payload.js";
 
-export { createMeetupDraft, createMeetupDraftFromFile } from "./create-event.js";
+export {
+  createMeetupDraft,
+  createMeetupDraftFromFile,
+  createMeetupDrafts,
+} from "./create-event.js";
 export type {
   CreateMeetupDraftFromFileOptions,
   CreateMeetupDraftFromFileResult,
   CreateMeetupDraftOptions,
   CreateMeetupDraftResult,
+  CreateMeetupDraftsOptions,
+  CreateMeetupDraftsResult,
 } from "./create-event.js";
 
 export { fetchAllVenues, formatVenueKey, listVenues } from "./list-venues.js";
 export type { ListVenuesOptions, MeetupVenue } from "./list-venues.js";
 
-export { DEFAULT_CONFIG_FILENAME, loadMeetupConfig, resolveHostIds } from "./config.js";
-export type { CoopkitConfig, MeetupConfig } from "./config.js";
+export {
+  DEFAULT_CONFIG_FILENAME,
+  loadMeetupConfig,
+  resolveGroupTargets,
+  resolveHostIds,
+} from "./config.js";
+export type { CoopkitConfig, GroupTarget, MeetupConfig } from "./config.js";

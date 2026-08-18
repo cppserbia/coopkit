@@ -92,6 +92,68 @@ the API accepts no offset. So `event.date` has two possible readings, and the
 Omitting `timezone` when your dates really are UTC silently shifts every event
 by the zone's offset, so set it whenever your source stores real instants.
 
+### Network events (one session, several groups)
+
+A Meetup **Pro network** cross-posts the same session to every group in the
+network. List the extra groups in `groups`, and give each its own host — groups
+in a network almost always have different organizers:
+
+```json
+{
+  "meetup": {
+    "groupUrlname": "chicago-c-cpp-users-group",
+    "timezone": "America/Chicago",
+    "venues": { "online": "online" },
+    "groups": ["cpp-serbia", "CPPTORONTO"],
+    "hosts": { "Rob Douglas": 13296813, "Alex Smith": 256192100, "Jordan Lee": 274644230 },
+    "groupHosts": {
+      "chicago-c-cpp-users-group": ["Rob Douglas"],
+      "cpp-serbia": ["Alex Smith"],
+      "CPPTORONTO": ["Jordan Lee"]
+    }
+  }
+}
+```
+
+`groupUrlname` is always the first target, then `groups` in order, de-duplicated
+case-insensitively (Meetup urlnames are case-insensitive, and a network may
+report `CPPTORONTO` where your config says `cpptoronto`).
+
+```bash
+# every group in the config
+bunx coopkit-meetup create-from-json --groups all --dry-run event.json
+
+# just some of them
+bunx coopkit-meetup create-from-json --groups "cpp-serbia,CPPTORONTO" event.json
+```
+
+Without `--groups` only `groupUrlname` is used, and `--output` keeps its
+original single-event shape — so existing setups are unaffected. With
+`--groups`, `--output` gets a per-group breakdown instead:
+
+```json
+{
+  "status": "partial",
+  "groups": [
+    { "groupUrlname": "chicago-c-cpp-users-group", "ok": true, "status": "created", "eventId": "1234", "eventUrl": "https://…", "photoAttached": false },
+    { "groupUrlname": "cpp-serbia", "ok": false, "error": "createEvent returned no event. …" }
+  ]
+}
+```
+
+Groups are processed **sequentially**, and one group failing does not stop the
+others — every outcome is reported so you can retry just the failures. The exit
+code is 1 if any group failed. There is **no rollback**: drafts already created
+stay, so a retry needs the failed groups named explicitly or it will duplicate
+the ones that worked.
+
+> **Why not `proNetworkEvents`?** `CreateEventInput` has a `proNetworkEvents`
+> input that propagates one event across a network via a saved `filterId`. That
+> filter cannot be enumerated through the API, so which groups it would reach is
+> unverifiable from code. Naming the groups is explicit, and each draft can be
+> reviewed or deleted on its own. Every account member must still have rights in
+> each target group — being a Pro network admin is not by itself enough.
+
 ### Hosts
 
 `eventHosts` takes Meetup **member IDs**, and the account must be a member of

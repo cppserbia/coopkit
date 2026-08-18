@@ -15,6 +15,18 @@ export interface MeetupConfig {
   hosts?: Record<string, number>;
   /** Names from `hosts` to list as event hosts when an event names none itself. */
   defaultHosts?: string[];
+  /**
+   * Additional group urlnames a single event should be created in, for a Meetup
+   * Pro network whose groups cross-post the same session. `groupUrlname` is
+   * always the first target; these follow, in order.
+   */
+  groups?: string[];
+  /**
+   * Per-group host overrides, keyed by group urlname, with values being names
+   * from `hosts`. Each group in a network usually has its own organizer, so a
+   * single `defaultHosts` rarely fits all of them.
+   */
+  groupHosts?: Record<string, string[]>;
 }
 
 export interface CoopkitConfig {
@@ -70,6 +82,35 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
       }
     }
   }
+  if (meetup.groups !== undefined) {
+    if (
+      !Array.isArray(meetup.groups) ||
+      meetup.groups.some((g) => typeof g !== "string" || g === "")
+    ) {
+      throw new Error(`${resolved}: meetup.groups must be an array of non-empty group urlnames.`);
+    }
+  }
+  if (meetup.groupHosts !== undefined) {
+    if (typeof meetup.groupHosts !== "object" || meetup.groupHosts === null) {
+      throw new Error(
+        `${resolved}: meetup.groupHosts must be an object mapping group urlnames to host-name arrays.`
+      );
+    }
+    for (const [group, names] of Object.entries(meetup.groupHosts)) {
+      if (!Array.isArray(names)) {
+        throw new Error(
+          `${resolved}: meetup.groupHosts[${JSON.stringify(group)}] must be an array.`
+        );
+      }
+      for (const name of names) {
+        if (typeof name !== "string" || !meetup.hosts || !(name in meetup.hosts)) {
+          throw new Error(
+            `${resolved}: meetup.groupHosts[${JSON.stringify(group)}] entry ${JSON.stringify(name)} is not a key of meetup.hosts.`
+          );
+        }
+      }
+    }
+  }
   if (meetup.defaultHosts !== undefined) {
     if (!Array.isArray(meetup.defaultHosts)) {
       throw new Error(
@@ -105,5 +146,61 @@ export function resolveHostIds(config: MeetupConfig, names?: string[]): number[]
       throw new Error(`Unknown host ${JSON.stringify(name)}. Add it to meetup.hosts.${suffix}`);
     }
     return id;
+  });
+}
+
+/** One group an event should be created in, with its hosts already resolved. */
+export interface GroupTarget {
+  urlname: string;
+  hosts: number[];
+}
+
+/**
+ * Expand config into the ordered list of groups to create the event in.
+ *
+ * `groupUrlname` is always first, then `groups`, de-duplicated
+ * case-insensitively (Meetup urlnames are case-insensitive, and a network can
+ * report a group as "CPPTORONTO" while a config says "cpptoronto"). Hosts come
+ * from `groupHosts[urlname]` when present, else the `hostNames` override, else
+ * `defaultHosts`.
+ */
+export function resolveGroupTargets(
+  config: MeetupConfig,
+  options: { only?: string[]; hostNames?: string[] } = {}
+): GroupTarget[] {
+  const all = [config.groupUrlname, ...(config.groups ?? [])];
+
+  const seen = new Set<string>();
+  const ordered = all.filter((urlname) => {
+    const key = urlname.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  let selected = ordered;
+  if (options.only && options.only.length > 0) {
+    const wanted = new Set(options.only.map((g) => g.toLowerCase()));
+    selected = ordered.filter((urlname) => wanted.has(urlname.toLowerCase()));
+    const missing = options.only.filter(
+      (g) => !ordered.some((u) => u.toLowerCase() === g.toLowerCase())
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `Group(s) ${missing.map((g) => JSON.stringify(g)).join(", ")} are not in this config. ` +
+          `Known: ${ordered.map((g) => JSON.stringify(g)).join(", ")}.`
+      );
+    }
+  }
+
+  // Match groupHosts keys case-insensitively too, for the same reason.
+  const hostsByGroup = new Map(
+    Object.entries(config.groupHosts ?? {}).map(([g, names]) => [g.toLowerCase(), names])
+  );
+
+  return selected.map((urlname) => {
+    const perGroup = hostsByGroup.get(urlname.toLowerCase());
+    const names = perGroup ?? options.hostNames;
+    return { urlname, hosts: resolveHostIds(config, names) };
   });
 }

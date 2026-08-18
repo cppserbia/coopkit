@@ -283,3 +283,78 @@ export async function createMeetupDraftFromFile(
     },
   });
 }
+
+export interface CreateMeetupDraftsOptions {
+  event: NormalizedEvent;
+  /** Groups to create the event in, in order, each with its own hosts. */
+  groups: Array<{ urlname: string; hosts?: number[] }>;
+  venues: VenueMap;
+  /** IANA timezone of the groups. See `BuildPayloadInput.timezone`. */
+  timezone?: string;
+  dryRun?: boolean;
+  credentials?: MeetupCredentials;
+  log?: (message: string) => void;
+  onCreated?: CreateMeetupDraftOptions["onCreated"];
+}
+
+export type CreateMeetupDraftsResult = {
+  results: Array<
+    { groupUrlname: string } & (
+      | { ok: true; result: CreateMeetupDraftResult }
+      | { ok: false; error: string }
+    )
+  >;
+};
+
+/**
+ * Create the same event as a Draft in several groups — the Meetup Pro network
+ * case, where one session is cross-posted to every group in the network.
+ *
+ * Meetup's native alternative is `CreateEventInput.proNetworkEvents`, which
+ * propagates one event across a network via a saved `filterId`. That filter
+ * cannot be enumerated through the API, so which groups it would reach is
+ * unverifiable from code; creating one event per named group is explicit,
+ * and each draft can be inspected or deleted on its own.
+ *
+ * Groups are processed **sequentially** — a partial failure must not race — and
+ * one group failing does not stop the rest. Every outcome is reported, so the
+ * caller can retry only the groups that failed. There is no cross-group
+ * rollback: on partial failure the drafts that succeeded stay.
+ */
+export async function createMeetupDrafts(
+  options: CreateMeetupDraftsOptions
+): Promise<CreateMeetupDraftsResult> {
+  const log = options.log ?? ((m) => console.error(m));
+  if (options.groups.length === 0) {
+    throw new Error("createMeetupDrafts called with no groups.");
+  }
+
+  const results: CreateMeetupDraftsResult["results"] = [];
+  for (const [index, group] of options.groups.entries()) {
+    log(`[${index + 1}/${options.groups.length}] ${group.urlname}`);
+    try {
+      const result = await createMeetupDraft({
+        event: options.event,
+        groupUrlname: group.urlname,
+        venues: options.venues,
+        ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+        ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
+        ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+        ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+        log,
+        ...(options.onCreated !== undefined ? { onCreated: options.onCreated } : {}),
+      });
+      results.push({ groupUrlname: group.urlname, ok: true, result });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      log(`[error] ${group.urlname}: ${error}`);
+      results.push({ groupUrlname: group.urlname, ok: false, error });
+    }
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  const failedNote =
+    failed.length > 0 ? `; failed: ${failed.map((f) => f.groupUrlname).join(", ")}` : "";
+  log(`Done: ${results.length - failed.length}/${results.length} group(s) succeeded${failedNote}`);
+  return { results };
+}

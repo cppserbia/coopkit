@@ -2,8 +2,13 @@
 import fs from "node:fs";
 import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";
-import { loadMeetupConfig, resolveHostIds } from "./config.js";
-import { createMeetupDraft, createMeetupDraftFromFile } from "./create-event.js";
+import { loadMeetupConfig, resolveGroupTargets, resolveHostIds } from "./config.js";
+import {
+  type CreateMeetupDraftsResult,
+  createMeetupDraft,
+  createMeetupDraftFromFile,
+  createMeetupDrafts,
+} from "./create-event.js";
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
 
@@ -12,20 +17,44 @@ import { loadEnvFile } from "./load-env.js";
  * — notably GitHub Actions — can capture the created event's id/url. Keeps the
  * package free of any Actions-specific coupling: it just emits JSON.
  */
+type SingleResult = {
+  status: string;
+  eventId?: string;
+  eventUrl?: string;
+  photoAttached?: boolean;
+};
+
+function summarizeSingle(result: SingleResult) {
+  return result.status === "created"
+    ? {
+        status: result.status,
+        eventId: result.eventId ?? "",
+        eventUrl: result.eventUrl ?? "",
+        photoAttached: result.photoAttached ?? false,
+      }
+    : { status: result.status };
+}
+
 function writeResultFile(
   outputPath: string | undefined,
-  result: { status: string; eventId?: string; eventUrl?: string; photoAttached?: boolean }
+  result: SingleResult | CreateMeetupDraftsResult
 ): void {
   if (!outputPath) return;
+
+  // A multi-group run has no single id/url to report, so emit the per-group
+  // breakdown instead of flattening it to one (arbitrary) event.
   const payload =
-    result.status === "created"
+    "results" in result
       ? {
-          status: result.status,
-          eventId: result.eventId ?? "",
-          eventUrl: result.eventUrl ?? "",
-          photoAttached: result.photoAttached ?? false,
+          status: result.results.every((r) => r.ok) ? "created" : "partial",
+          groups: result.results.map((r) =>
+            r.ok
+              ? { groupUrlname: r.groupUrlname, ok: true, ...summarizeSingle(r.result) }
+              : { groupUrlname: r.groupUrlname, ok: false, error: r.error }
+          ),
         }
-      : { status: result.status };
+      : summarizeSingle(result);
+
   fs.writeFileSync(outputPath, `${JSON.stringify(payload)}\n`);
 }
 
@@ -137,6 +166,11 @@ const createFromJsonCmd = defineCommand({
       description:
         "Host name(s) from meetup.hosts, comma-separated. Defaults to meetup.defaultHosts.",
     },
+    groups: {
+      type: "string",
+      description:
+        'Group urlname(s) to create the event in, comma-separated, or "all" for every group in the config. Defaults to meetup.groupUrlname only.',
+    },
     output: {
       type: "string",
       description:
@@ -148,16 +182,44 @@ const createFromJsonCmd = defineCommand({
     const config = loadMeetupConfig(args.config);
     const raw = args.file ? fs.readFileSync(args.file, "utf8") : readStdin();
     const event = parseNormalizedEvent(raw);
-    const hosts = resolveHostIds(config, parseHostArg(args.host));
-    const result = await createMeetupDraft({
+    const hostNames = parseHostArg(args.host);
+    const requested = parseHostArg(args.groups);
+    const multiGroup = requested !== undefined;
+    const only =
+      requested && !(requested.length === 1 && requested[0]?.toLowerCase() === "all")
+        ? requested
+        : undefined;
+    const targets = resolveGroupTargets(config, {
+      ...(only !== undefined ? { only } : {}),
+      ...(hostNames !== undefined ? { hostNames } : {}),
+    });
+
+    // Single-group runs keep returning the bare result, so existing callers
+    // parsing --output see no change; --groups opts into the per-group report.
+    if (!multiGroup) {
+      const target = targets[0];
+      if (!target) throw new Error("No group resolved from the config.");
+      const result = await createMeetupDraft({
+        event,
+        groupUrlname: target.urlname,
+        venues: config.venues,
+        ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+        ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
+        dryRun: Boolean(args["dry-run"]),
+      });
+      writeResultFile(args.output, result);
+      return;
+    }
+
+    const result = await createMeetupDrafts({
       event,
-      groupUrlname: config.groupUrlname,
+      groups: targets,
       venues: config.venues,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
-      ...(hosts.length > 0 ? { hosts } : {}),
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
+    if (result.results.some((r) => !r.ok)) process.exitCode = 1;
   },
 });
 

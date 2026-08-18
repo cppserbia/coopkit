@@ -43,5 +43,6 @@
     "pnpm-lock.yaml",
     ".husky/_/**"
   ],
-  "ignoreRegExpList": ["Urls", "Email", "HexValues", "Base64"]
+  "ignoreRegExpList": ["Urls", "Email", "HexValues", "Base64"],
+  "words": ["CPPTORONTO", "urlnames"]
 }
