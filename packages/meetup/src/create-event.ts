@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { EventFrontmatter, NormalizedEvent } from "@coopkit/core";
+import type { EventFrontmatter, NormalizedEvent, PublishedEventRef } from "@coopkit/core";
 import { frontmatterToNormalizedEvent } from "@coopkit/core";
 import matter from "gray-matter";
 import {
@@ -11,9 +11,12 @@ import {
 } from "./client.js";
 import {
   type CreateEventPayload,
+  type CreatedEventBookkeeping,
   buildCreateEventPayload,
+  createdGroupEvents,
   detectContentType,
   isEventAlreadyCreated,
+  mergeCreatedGroupEvents,
   stripLeadingHeading,
 } from "./payload.js";
 import { type VenueMap, resolveVenueId } from "./venues.js";
@@ -161,6 +164,8 @@ export interface CreateMeetupDraftOptions {
    */
   onCreated?: (info: {
     event: NormalizedEvent;
+    /** The group the event was created in — the caller may be creating in several. */
+    groupUrlname: string;
     result: { eventId: string; eventUrl: string; photoAttached: boolean };
   }) => Promise<void> | void;
 }
@@ -223,9 +228,94 @@ export async function createMeetupDraft(
 
   const result = { eventId: created.id, eventUrl: created.eventUrl, photoAttached };
   if (options.onCreated) {
-    await options.onCreated({ event: options.event, result });
+    await options.onCreated({
+      event: options.event,
+      groupUrlname: options.groupUrlname,
+      result,
+    });
   }
   return { status: "created", ...result };
+}
+
+/** Frontmatter as read off an event file, including the bookkeeping fields. */
+type EventFileFrontmatter = EventFrontmatter & {
+  event_id?: string | number;
+  meetup_events?: unknown;
+};
+
+interface ReadEventFile {
+  parsed: matter.GrayMatterFile<string>;
+  fm: EventFileFrontmatter;
+  event: NormalizedEvent;
+}
+
+/**
+ * Read an event markdown file and normalize it. No idempotency check here —
+ * both file entry points do that themselves, against different scopes (one
+ * group vs. a set of them).
+ */
+function readEventFile(eventFile: string): ReadEventFile {
+  if (!fs.existsSync(eventFile)) {
+    throw new Error(`Event file not found: ${eventFile}`);
+  }
+
+  const parsed = matter(fs.readFileSync(eventFile, "utf8"));
+  const fm = parsed.data as EventFileFrontmatter;
+  const id = path.basename(eventFile).replace(/\.md$/, "");
+  const event = frontmatterToNormalizedEvent(id, fm, stripLeadingHeading(parsed.content));
+  return { parsed, fm, event };
+}
+
+/** Human-readable reason for skipping a group that is already recorded. */
+function alreadyCreatedReason(eventFile: string, entry: PublishedEventRef): string {
+  return `${eventFile} already has event_id=${entry.event_id} for group ${entry.group}; nothing to do.`;
+}
+
+export interface RecordCreatedGroupEventInput {
+  /** Markdown body, as returned by gray-matter. */
+  content: string;
+  /** Parsed frontmatter. Not mutated; the updated copy goes into the output. */
+  data: Record<string, unknown>;
+  /** The group + ids just created. */
+  entry: PublishedEventRef;
+  /** Groups already recorded in this file, in the order they should stay. */
+  existing: readonly PublishedEventRef[];
+  /**
+   * The config's primary group. Only a create in *this* group updates the
+   * `event_url` / `event_id` scalars.
+   */
+  primaryGroup?: string;
+}
+
+/**
+ * Record one created group event in an event file's frontmatter and return the
+ * new file contents. Pure: the caller does the writing, which is what makes
+ * the merge testable without a filesystem or a network.
+ *
+ * The scalars are written **only** for the primary group. Putting a secondary
+ * group's id in `event_url` / `event_id` would make a later plain `create` skip
+ * the file and so never create the primary event at all, and would point an
+ * adopter site's "Register on Meetup" link at the wrong group. `meetup_events`
+ * always gets the row, primary or not, and always includes the primary — it is
+ * the complete record.
+ */
+export function recordCreatedGroupEvent(input: RecordCreatedGroupEventInput): string {
+  const { content, data, entry, existing, primaryGroup } = input;
+  const isPrimary =
+    primaryGroup !== undefined && entry.group.toLowerCase() === primaryGroup.toLowerCase();
+
+  const next: Record<string, unknown> = { ...data };
+  if (isPrimary) {
+    if (entry.event_url !== undefined) next.event_url = entry.event_url;
+    next.event_id = entry.event_id;
+  }
+  next.meetup_events = mergeCreatedGroupEvents(existing, entry).map((e) => ({
+    group: e.group,
+    event_id: e.event_id,
+    ...(e.event_url !== undefined ? { event_url: e.event_url } : {}),
+  }));
+
+  return matter.stringify(content, next);
 }
 
 export interface CreateMeetupDraftFromFileOptions {
@@ -261,22 +351,26 @@ export async function createMeetupDraftFromFile(
 ): Promise<CreateMeetupDraftFromFileResult> {
   const log = options.log ?? ((m) => console.error(m));
 
-  if (!fs.existsSync(options.eventFile)) {
-    throw new Error(`Event file not found: ${options.eventFile}`);
-  }
+  const { parsed, fm, event } = readEventFile(options.eventFile);
 
-  const raw = fs.readFileSync(options.eventFile, "utf8");
-  const parsed = matter(raw);
-  const fm = parsed.data as EventFrontmatter & { event_id?: string | number };
-
-  if (isEventAlreadyCreated(fm.event_id)) {
-    const reason = `${options.eventFile} already has event_id=${fm.event_id}; nothing to do.`;
+  // Same dedup rule as the multi-group entry point, scoped to this one group:
+  // a group recorded in `meetup_events` counts as created even when the
+  // scalars are empty (they only ever mirror the primary group).
+  const already = createdGroupEvents(fm, {
+    assumedGroup: options.groupUrlname,
+    source: options.eventFile,
+  });
+  const recorded = already.get(options.groupUrlname.toLowerCase());
+  if (recorded) {
+    // Keep the original wording when the scalar is what matched, so callers
+    // grepping for it (and the existing workflows) see no change.
+    const reason =
+      isEventAlreadyCreated(fm.event_id) && String(fm.event_id).trim() === recorded.event_id
+        ? `${options.eventFile} already has event_id=${fm.event_id}; nothing to do.`
+        : alreadyCreatedReason(options.eventFile, recorded);
     log(`[skip] ${reason}`);
     return { status: "skipped", reason };
   }
-
-  const id = path.basename(options.eventFile).replace(/\.md$/, "");
-  const event = frontmatterToNormalizedEvent(id, fm, stripLeadingHeading(parsed.content));
 
   return createMeetupDraft({
     event,
@@ -383,4 +477,160 @@ export async function createMeetupDrafts(
     failed.length > 0 ? `; failed: ${failed.map((f) => f.groupUrlname).join(", ")}` : "";
   log(`Done: ${results.length - failed.length}/${results.length} group(s) succeeded${failedNote}`);
   return { results };
+}
+
+export interface CreateMeetupDraftsFromFileOptions {
+  /** Path to the event markdown file (cppserbia-style: one event per file). */
+  eventFile: string;
+  /**
+   * Groups to create the event in, in order, each with its own hosts and its own
+   * timezone. The timezone must be per group: Meetup reads `startDateTime` as
+   * wall time in the *receiving* group's zone, so one shared wall time would put
+   * the event at a different instant in each group.
+   */
+  groups: Array<{
+    urlname: string;
+    hosts?: number[];
+    includeSpeaker?: boolean;
+    timezone?: string;
+  }>;
+  /**
+   * The config's primary group — the only one whose ids are mirrored into the
+   * `event_url` / `event_id` scalars. Deliberately independent of `groups`, so
+   * "primary" never depends on which groups a given run happened to select.
+   */
+  primaryGroup?: string;
+  venues: VenueMap;
+  /** Fallback IANA timezone for groups that name none. See `BuildPayloadInput.timezone`. */
+  timezone?: string;
+  dryRun?: boolean;
+  credentials?: MeetupCredentials;
+  log?: (message: string) => void;
+}
+
+export type CreateMeetupDraftsFromFileResult = {
+  results: Array<
+    { groupUrlname: string } & (
+      | { ok: true; result: CreateMeetupDraftFromFileResult }
+      | { ok: false; error: string }
+    )
+  >;
+};
+
+/**
+ * Create the event described by one markdown file as a Draft in several groups
+ * — the file-per-event counterpart of `createMeetupDrafts`.
+ *
+ * Idempotent **per group**: `meetup_events` in the frontmatter records every
+ * group the event exists in, and a recorded group is reported as
+ * `{status: "skipped"}` without any API call. That makes a retry after a
+ * partial failure safe — it recreates only the groups that are missing.
+ *
+ * The file is written back **inside** `onCreated`, once per group, so a failure
+ * halfway through still leaves the successful groups recorded on disk. When
+ * every requested group is already recorded, this returns before constructing a
+ * client or touching the file, so "the file did not change" keeps meaning "no
+ * work was done".
+ */
+export async function createMeetupDraftsFromFile(
+  options: CreateMeetupDraftsFromFileOptions
+): Promise<CreateMeetupDraftsFromFileResult> {
+  const log = options.log ?? ((m) => console.error(m));
+  const { parsed, fm, event } = readEventFile(options.eventFile);
+
+  // Meetup urlnames are case-insensitive, so asking for the same group twice
+  // under different casing must still create exactly one draft.
+  const requested: CreateMeetupDraftsFromFileOptions["groups"] = [];
+  const seen = new Set<string>();
+  for (const group of options.groups) {
+    const key = group.urlname.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    requested.push(group);
+  }
+
+  const bookkeeping = {
+    ...(options.primaryGroup !== undefined ? { assumedGroup: options.primaryGroup } : {}),
+    source: options.eventFile,
+  };
+  let already = createdGroupEvents(fm, bookkeeping);
+
+  const byGroup = new Map<string, CreateMeetupDraftsFromFileResult["results"][number]>();
+  const todo: CreateMeetupDraftsFromFileOptions["groups"] = [];
+  for (const group of requested) {
+    const recorded = already.get(group.urlname.toLowerCase());
+    if (recorded) {
+      const reason = alreadyCreatedReason(options.eventFile, recorded);
+      log(`[skip] ${reason}`);
+      byGroup.set(group.urlname.toLowerCase(), {
+        groupUrlname: group.urlname,
+        ok: true,
+        result: { status: "skipped", reason },
+      });
+      continue;
+    }
+    todo.push(group);
+  }
+
+  // Nothing to do: return before `createMeetupDrafts` (which rejects an empty
+  // group list), before any client is built, and without writing the file.
+  if (todo.length === 0) {
+    return { results: requested.map((g) => orderedResult(byGroup, g.urlname)) };
+  }
+
+  let content = parsed.content;
+  let data = parsed.data as Record<string, unknown>;
+
+  const created = await createMeetupDrafts({
+    event,
+    groups: todo,
+    venues: options.venues,
+    ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+    ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+    ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+    log,
+    onCreated: ({ groupUrlname, result }) => {
+      const entry: PublishedEventRef = {
+        group: groupUrlname,
+        event_id: result.eventId,
+        ...(result.eventUrl !== "" ? { event_url: result.eventUrl } : {}),
+      };
+      const updated = recordCreatedGroupEvent({
+        content,
+        data,
+        entry,
+        existing: [...already.values()],
+        ...(options.primaryGroup !== undefined ? { primaryGroup: options.primaryGroup } : {}),
+      });
+      fs.writeFileSync(options.eventFile, updated);
+
+      // Re-read our own output so the next group merges onto exactly what is
+      // on disk, rather than a hand-maintained copy that could drift.
+      const reloaded = matter(updated);
+      content = reloaded.content;
+      data = reloaded.data as Record<string, unknown>;
+      already = createdGroupEvents(data as CreatedEventBookkeeping, bookkeeping);
+      log(`[updated] ${options.eventFile} with meetup_events entry for ${groupUrlname}`);
+    },
+  });
+
+  for (const result of created.results) {
+    byGroup.set(result.groupUrlname.toLowerCase(), result);
+  }
+
+  return { results: requested.map((g) => orderedResult(byGroup, g.urlname)) };
+}
+
+/** Look up a group's outcome, so results come back in the requested order. */
+function orderedResult(
+  byGroup: Map<string, CreateMeetupDraftsFromFileResult["results"][number]>,
+  urlname: string
+): CreateMeetupDraftsFromFileResult["results"][number] {
+  return (
+    byGroup.get(urlname.toLowerCase()) ?? {
+      groupUrlname: urlname,
+      ok: false,
+      error: "No result reported for this group.",
+    }
+  );
 }

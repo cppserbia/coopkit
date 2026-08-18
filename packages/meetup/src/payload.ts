@@ -1,4 +1,4 @@
-import type { NormalizedEvent } from "@coopkit/core";
+import type { NormalizedEvent, PublishedEventRef } from "@coopkit/core";
 import { type SpeakerDetailsInput, speakerDetailsFrom } from "./speaker.js";
 import { type VenueId, type VenueMap, resolveVenueId } from "./venues.js";
 
@@ -56,6 +56,123 @@ export function isEventAlreadyCreated(eventId: unknown): boolean {
   if (s === "") return false;
   if (PLACEHOLDER_RE.test(s)) return false;
   return /^\d+$/.test(s);
+}
+
+const MEETUP_EVENT_URL_RE = /^https?:\/\/(?:www\.)?meetup\.com\/([^/]+)\/events\/\d+/i;
+
+/**
+ * Extract the group urlname from a Meetup event URL
+ * (`https://www.meetup.com/<urlname>/events/<id>/`).
+ *
+ * This is what lets a file written before per-group bookkeeping existed still
+ * say which group its `event_url` / `event_id` scalars belong to, so no
+ * migration step is needed: the legacy pair is attributed to its own group and
+ * that group is skipped on the next run.
+ */
+export function groupUrlnameFromEventUrl(eventUrl: unknown): string | undefined {
+  if (typeof eventUrl !== "string") return undefined;
+  return MEETUP_EVENT_URL_RE.exec(eventUrl.trim())?.[1];
+}
+
+/** The bookkeeping fields `createdGroupEvents` reads out of frontmatter. */
+export interface CreatedEventBookkeeping {
+  event_id?: string | number;
+  event_url?: unknown;
+  meetup_events?: unknown;
+}
+
+export interface CreatedGroupEventsOptions {
+  /**
+   * Group to attribute a legacy `event_id` scalar to when `event_url` is
+   * missing or is not a Meetup event URL. Typically the config's primary group.
+   */
+  assumedGroup?: string;
+  /** File path (or similar) named in error messages. */
+  source?: string;
+}
+
+/**
+ * Which groups this event has already been created in, keyed by **lower-cased**
+ * group urlname — Meetup urlnames are case-insensitive, and a Pro network can
+ * report a group as `CPPTORONTO` where a config says `cpptoronto`.
+ *
+ * Reads `meetup_events`, then folds in the legacy `event_url` / `event_id`
+ * scalar pair attributed via `groupUrlnameFromEventUrl` (falling back to
+ * `options.assumedGroup`). An explicit `meetup_events` entry always wins over
+ * the inferred one.
+ *
+ * Throws on a malformed `meetup_events` entry rather than ignoring it:
+ * silently dropping a hand-edited typo would silently create a duplicate
+ * draft, which is the exact failure this record exists to prevent.
+ */
+export function createdGroupEvents(
+  fm: CreatedEventBookkeeping,
+  options: CreatedGroupEventsOptions = {}
+): Map<string, PublishedEventRef> {
+  const where = options.source !== undefined ? ` in ${options.source}` : "";
+  const created = new Map<string, PublishedEventRef>();
+
+  const list = fm.meetup_events;
+  if (list !== undefined && list !== null) {
+    if (!Array.isArray(list)) {
+      throw new Error(`meetup_events${where} must be a list of {group, event_id} entries.`);
+    }
+    for (const [index, raw] of list.entries()) {
+      const at = `meetup_events[${index}]${where}`;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error(`${at} must be an object with \`group\` and \`event_id\`.`);
+      }
+      const entry = raw as { group?: unknown; event_id?: unknown; event_url?: unknown };
+      if (typeof entry.group !== "string" || entry.group.trim() === "") {
+        throw new Error(`${at} is missing a non-empty \`group\`.`);
+      }
+      if (!isEventAlreadyCreated(entry.event_id)) {
+        throw new Error(
+          `${at} has \`event_id\` ${JSON.stringify(entry.event_id)}, which is not a numeric event id.`
+        );
+      }
+      const group = entry.group.trim();
+      created.set(group.toLowerCase(), {
+        group,
+        event_id: String(entry.event_id).trim(),
+        ...(typeof entry.event_url === "string" && entry.event_url !== ""
+          ? { event_url: entry.event_url }
+          : {}),
+      });
+    }
+  }
+
+  if (isEventAlreadyCreated(fm.event_id)) {
+    const group = groupUrlnameFromEventUrl(fm.event_url) ?? options.assumedGroup;
+    if (group !== undefined && group !== "" && !created.has(group.toLowerCase())) {
+      created.set(group.toLowerCase(), {
+        group,
+        event_id: String(fm.event_id).trim(),
+        ...(typeof fm.event_url === "string" && fm.event_url !== ""
+          ? { event_url: fm.event_url }
+          : {}),
+      });
+    }
+  }
+
+  return created;
+}
+
+/**
+ * Insert-or-replace `entry` in `existing`, matching `group`
+ * case-insensitively and preserving the existing order. Re-running a group
+ * that is already recorded refreshes its row instead of appending a second one.
+ */
+export function mergeCreatedGroupEvents(
+  existing: readonly PublishedEventRef[],
+  entry: PublishedEventRef
+): PublishedEventRef[] {
+  const key = entry.group.toLowerCase();
+  const index = existing.findIndex((e) => e.group.toLowerCase() === key);
+  if (index === -1) return [...existing, entry];
+  const merged = [...existing];
+  merged[index] = entry;
+  return merged;
 }
 
 export function stripLeadingHeading(body: string): string {

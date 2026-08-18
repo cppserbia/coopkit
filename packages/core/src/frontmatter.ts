@@ -1,4 +1,24 @@
 /**
+ * One event as published on an external platform, for bookkeeping in an
+ * adopter's source file.
+ *
+ * Platform-neutral: `group` is whatever the platform calls a community (a
+ * Meetup group urlname, a Luma calendar, a Discord guild), and `event_id` is a
+ * string so it round-trips through YAML losslessly — a large numeric id stays
+ * exactly as the platform reported it.
+ */
+export interface PublishedEventRef {
+  /** The platform's community identifier the event was created in. */
+  group: string;
+
+  /** The platform's event id, as a string. */
+  event_id: string;
+
+  /** Public URL of the event, when the platform reports one. */
+  event_url?: string;
+}
+
+/**
  * Event frontmatter shape — the YAML at the top of an event markdown file.
  *
  * This is one of two ways adopters describe events to coopkit. The other is
@@ -46,6 +66,18 @@ export interface EventFrontmatter {
 
   /** Numeric Meetup event ID, or a placeholder before creation. */
   event_id?: string | number;
+
+  /**
+   * Every group this event has been created in, including the one mirrored by
+   * the `event_url` / `event_id` scalars above. Written back by
+   * `@coopkit/meetup` when one event is cross-posted to several groups, and
+   * read as the per-group idempotency record: a group listed here is never
+   * created again.
+   *
+   * Pure bookkeeping — it describes where the event was published, not what
+   * the event is, so it is deliberately absent from `NormalizedEvent`.
+   */
+  meetup_events?: PublishedEventRef[];
 
   /** Public registration URL (used by social media announcements). */
   registration_url?: string;

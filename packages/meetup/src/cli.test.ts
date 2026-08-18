@@ -16,6 +16,22 @@ const CONFIG = JSON.stringify({
   meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 } },
 });
 
+const NETWORK_CONFIG = JSON.stringify({
+  meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 }, groups: ["CPPTORONTO"] },
+});
+
+const EVENT_MARKDOWN = [
+  "---",
+  "title: Test Event",
+  "date: 2026-05-09T16:00:00.000Z",
+  "duration: PT1H",
+  "venues:",
+  "  - online",
+  "---",
+  "",
+  "Body.",
+].join("\n");
+
 const EVENT = JSON.stringify({
   id: "2026-05-09-test",
   title: "Test Event",
@@ -150,6 +166,134 @@ describe("exit codes", () => {
 
       expect(code).toBe(0);
       expect(JSON.parse(readFileSync(out, "utf8")).status).toBe("dry-run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("create --groups (dry-run)", () => {
+  it("reports every group in the config and leaves the file untouched", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        "all",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result.status).toBe("dry-run");
+      expect(result.groups.map((g: { groupUrlname: string }) => g.groupUrlname)).toEqual([
+        "cpp-serbia",
+        "CPPTORONTO",
+      ]);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the single-group --output shape without --groups", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result).toEqual({ status: "dry-run" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 1 and reports partial when a group fails", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      // No "online" venue: every group fails to build its payload.
+      writeFileSync(
+        config,
+        JSON.stringify({
+          meetup: { groupUrlname: "cpp-serbia", venues: { other: 1 }, groups: ["CPPTORONTO"] },
+        })
+      );
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        "all",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(1);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result.status).toBe("partial");
+      expect(result.groups.every((g: { ok: boolean }) => !g.ok)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats --groups "," as no --groups at all, not as every group', async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        ",",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      // An empty parsed list used to be truthy, which silently meant "all".
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "dry-run" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
