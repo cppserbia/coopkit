@@ -48,6 +48,7 @@ type SingleResult = {
   eventId?: string;
   eventUrl?: string;
   photoAttached?: boolean;
+  speakerPhotoAttached?: boolean;
 };
 
 function summarizeSingle(result: SingleResult) {
@@ -57,6 +58,7 @@ function summarizeSingle(result: SingleResult) {
         eventId: result.eventId ?? "",
         eventUrl: result.eventUrl ?? "",
         photoAttached: result.photoAttached ?? false,
+        speakerPhotoAttached: result.speakerPhotoAttached ?? false,
       }
     : { status: result.status };
 }
@@ -169,7 +171,7 @@ const createCmd = defineCommand({
     output: {
       type: "string",
       description:
-        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached, speakerPhotoAttached).",
     },
   },
   async run({ args }) {
@@ -191,14 +193,16 @@ const createCmd = defineCommand({
           : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
         includeSpeaker: target.includeSpeaker,
+        includeSpeakerPhoto: target.includeSpeakerPhoto,
         dryRun: Boolean(args["dry-run"]),
       });
       writeResultFile(args.output, result);
       return;
     }
 
-    // `targets` carry a per-group timezone; config.timezone stays only as the
-    // fallback for a single-group config that names no groupTimezones.
+    // `targets` carry each group's groupTimezones entry. Passing config.timezone
+    // marks the dates as true instants: it is the fallback for a single selected
+    // group, and with several, createMeetupDraftsFromFile looks up the unmapped ones.
     const result = await createMeetupDraftsFromFile({
       eventFile: args.eventFile,
       groups: targets,
@@ -269,7 +273,7 @@ const createFromJsonCmd = defineCommand({
     output: {
       type: "string",
       description:
-        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached, speakerPhotoAttached).",
     },
   },
   async run({ args }) {
@@ -293,14 +297,16 @@ const createFromJsonCmd = defineCommand({
           : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
         includeSpeaker: target.includeSpeaker,
+        includeSpeakerPhoto: target.includeSpeakerPhoto,
         dryRun: Boolean(args["dry-run"]),
       });
       writeResultFile(args.output, result);
       return;
     }
 
-    // `targets` carry a per-group timezone; config.timezone stays only as the
-    // fallback for a single-group config that names no groupTimezones.
+    // `targets` carry each group's groupTimezones entry. Passing config.timezone
+    // marks the dates as true instants: it is the fallback for a single selected
+    // group, and with several, createMeetupDrafts looks up the unmapped ones.
     const result = await createMeetupDrafts({
       event,
       groups: targets,

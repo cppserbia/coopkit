@@ -9,6 +9,7 @@ import {
   type MeetupCredentials,
   createMeetupClient,
 } from "./client.js";
+import { fetchGroupInfo } from "./list-groups.js";
 import {
   type CreateEventPayload,
   type CreatedEventBookkeeping,
@@ -19,6 +20,7 @@ import {
   mergeCreatedGroupEvents,
   stripLeadingHeading,
 } from "./payload.js";
+import type { SpeakerDetailsInput } from "./speaker.js";
 import { type VenueMap, resolveVenueId } from "./venues.js";
 
 const CREATE_EVENT_MUTATION = `
@@ -43,6 +45,15 @@ const CREATE_EVENT_PHOTO_MUTATION = `
       photo { id }
       uploadUrl
       error { message code field }
+    }
+  }
+`;
+
+const EDIT_EVENT_SPEAKER_MUTATION = `
+  mutation EditEventSpeaker($input: EditEventInput!) {
+    editEvent(input: $input) {
+      event { id }
+      errors { message code field }
     }
   }
 `;
@@ -100,12 +111,16 @@ async function callCreateEvent(
   return result.event;
 }
 
-async function uploadFeaturedPhoto(
+/**
+ * Upload an image as a photo of `eventId` and return the new photo's ID.
+ * Meetup's flow is two steps: `createGroupEventPhoto` registers the photo and
+ * hands back an `uploadUrl`, then the bytes are PUT there.
+ */
+async function uploadEventPhoto(
   client: MeetupClient,
-  groupId: string,
-  eventId: string,
-  imageUrl: string
-): Promise<void> {
+  input: { groupId: string; eventId: string; imageUrl: string; setAsMain: boolean }
+): Promise<string> {
+  const { groupId, eventId, imageUrl, setAsMain } = input;
   const imgResp = await fetch(imageUrl);
   if (!imgResp.ok) {
     throw new Error(`Failed to fetch image ${imageUrl}: ${imgResp.status}`);
@@ -126,7 +141,7 @@ async function uploadFeaturedPhoto(
       eventId,
       photoType: "EVENT_PHOTO",
       contentType,
-      setAsMain: true,
+      setAsMain,
     },
   });
 
@@ -142,6 +157,87 @@ async function uploadFeaturedPhoto(
   }
 
   await client.uploadPhoto(uploadUrl, buffer, contentTypeHeader ?? "image/jpeg");
+  return photo.id;
+}
+
+/**
+ * The headshot to attach to the speaker profile, or undefined when there is
+ * nothing to attach: the profile is not being sent (group not opted in, or no
+ * bio) or the speaker has no `avatarUrl`. Only consulted when the caller opted
+ * into the photo (`includeSpeakerPhoto`).
+ *
+ * Like the featured photo (`imageUrl`), the headshot is downloaded with
+ * `fetch`, so only an http(s) URL works. `NormalizedSpeaker.avatarUrl` may also
+ * be a filesystem path; that is skipped with a warning rather than failing
+ * mid-upload.
+ */
+function speakerPhotoUrl(
+  event: NormalizedEvent,
+  payload: CreateEventPayload,
+  log: (message: string) => void
+): string | undefined {
+  const avatarUrl = event.speaker?.avatarUrl?.trim();
+  if (!payload.speakerDetails || !avatarUrl) return undefined;
+  if (!/^https?:\/\//i.test(avatarUrl)) {
+    log(
+      `[warn] Speaker photo skipped: avatarUrl must be an http(s) URL, got ${JSON.stringify(avatarUrl)}.`
+    );
+    return undefined;
+  }
+  return avatarUrl;
+}
+
+/**
+ * Give an already-created event's speaker profile its photo.
+ *
+ * `SpeakerDetailsInput.photoId` must name a photo that already belongs to the
+ * group, and no mutation uploads a photo for a speaker as such. So the headshot
+ * is uploaded as one of the event's photos, then the whole profile is sent
+ * again through `editEvent`, now with `photoId`.
+ */
+async function attachSpeakerPhoto(
+  client: MeetupClient,
+  input: {
+    groupId: string;
+    eventId: string;
+    avatarUrl: string;
+    speakerDetails: SpeakerDetailsInput;
+  }
+): Promise<void> {
+  // There is no speaker PhotoType. EVENT_PHOTO tied to this event is the
+  // narrowest owner on offer, and the one the featured photo already uploads
+  // with: GROUP_PHOTO would land among the group's own photos, and
+  // MEMBER_PHOTO belongs to a member profile (the organizer's, not the
+  // speaker's). setAsMain: false keeps the banner as the featured photo.
+  const photoId = await uploadEventPhoto(client, {
+    groupId: input.groupId,
+    eventId: input.eventId,
+    imageUrl: input.avatarUrl,
+    setAsMain: false,
+  });
+  // Meetup reads photoId 0 (or no photoId) as "no photo", which editEvent
+  // would accept without error, so anything but a positive integer is refused
+  // here rather than reported as attached.
+  if (!/^[1-9]\d*$/.test(photoId)) {
+    throw new MeetupApiError(
+      `createGroupEventPhoto returned photo id ${JSON.stringify(photoId)}; speakerDetails.photoId needs a positive integer.`
+    );
+  }
+
+  const data = await client.graphql<{
+    editEvent: { event: { id: string } | null } & GqlErrors;
+  }>(EDIT_EVENT_SPEAKER_MUTATION, {
+    input: { eventId: input.eventId, speakerDetails: { ...input.speakerDetails, photoId } },
+  });
+
+  const result = data.editEvent;
+  if (!result.event || (result.errors?.length ?? 0) > 0) {
+    const details = formatErrors(result.errors);
+    throw new MeetupApiError(
+      `editEvent did not set the speaker photo. ${details || "(no error details)"}`,
+      result.errors ?? undefined
+    );
+  }
 }
 
 export interface CreateMeetupDraftOptions {
@@ -154,25 +250,48 @@ export interface CreateMeetupDraftOptions {
   hosts?: number[];
   /** Attach `event.speaker` as Meetup's Pro speaker profile. */
   includeSpeaker?: boolean;
+  /**
+   * Also give that profile its photo: upload `event.speaker.avatarUrl` (an
+   * http(s) URL) after the event is created and set it with `editEvent`.
+   * Opt-in, default false; without it `avatarUrl` is ignored. Has no effect
+   * unless the profile itself is sent (`includeSpeaker`, and a speaker bio).
+   */
+  includeSpeakerPhoto?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
   /**
-   * Invoked once after a successful create (and after the optional photo
-   * upload). The adopter persists `eventId` + `eventUrl` wherever their
-   * source-of-truth lives — frontmatter, an events.yml, a database, etc.
+   * Invoked once after a successful create (and after the optional featured
+   * and speaker photo uploads). The adopter persists `eventId` + `eventUrl`
+   * wherever their source-of-truth lives — frontmatter, an events.yml, a
+   * database, etc.
    */
   onCreated?: (info: {
     event: NormalizedEvent;
     /** The group the event was created in — the caller may be creating in several. */
     groupUrlname: string;
-    result: { eventId: string; eventUrl: string; photoAttached: boolean };
+    result: {
+      eventId: string;
+      eventUrl: string;
+      photoAttached: boolean;
+      speakerPhotoAttached: boolean;
+    };
   }) => Promise<void> | void;
 }
 
 export type CreateMeetupDraftResult =
   | { status: "dry-run"; payload: CreateEventPayload }
-  | { status: "created"; eventId: string; eventUrl: string; photoAttached: boolean };
+  | {
+      status: "created";
+      eventId: string;
+      eventUrl: string;
+      photoAttached: boolean;
+      /**
+       * Whether `speaker.avatarUrl` ended up as the speaker profile's photo.
+       * Always false without `includeSpeakerPhoto`.
+       */
+      speakerPhotoAttached: boolean;
+    };
 
 /**
  * Primary, platform-neutral entry point. Takes a `NormalizedEvent` from any
@@ -201,9 +320,18 @@ export async function createMeetupDraft(
     );
   }
 
+  // Opt-in: without includeSpeakerPhoto, avatarUrl is not looked at, so the
+  // run (and its log) is what it was before the speaker photo existed.
+  const avatarUrl = options.includeSpeakerPhoto
+    ? speakerPhotoUrl(options.event, payload, log)
+    : undefined;
+
   if (options.dryRun) {
     log(`--- DRY RUN: would create Meetup draft for ${options.event.id} ---`);
     console.log(JSON.stringify(payload, null, 2));
+    if (avatarUrl) {
+      log(`--- DRY RUN: would then upload speaker photo ${avatarUrl} and set it via editEvent ---`);
+    }
     return { status: "dry-run", payload };
   }
 
@@ -212,12 +340,23 @@ export async function createMeetupDraft(
   const created = await callCreateEvent(client, payload);
   log(`Created draft id=${created.id} url=${created.eventUrl}`);
 
+  // Both photo uploads need the group's ID; look it up once, on first use.
+  let groupId: string | undefined;
+  const resolveGroupId = async (): Promise<string> => {
+    groupId ??= await getGroupId(client, options.groupUrlname);
+    return groupId;
+  };
+
   let photoAttached = false;
   if (options.event.imageUrl) {
     try {
       log(`Uploading featured photo from ${options.event.imageUrl}...`);
-      const groupId = await getGroupId(client, options.groupUrlname);
-      await uploadFeaturedPhoto(client, groupId, created.id, options.event.imageUrl);
+      await uploadEventPhoto(client, {
+        groupId: await resolveGroupId(),
+        eventId: created.id,
+        imageUrl: options.event.imageUrl,
+        setAsMain: true,
+      });
       log("Photo attached.");
       photoAttached = true;
     } catch (err) {
@@ -226,7 +365,33 @@ export async function createMeetupDraft(
     }
   }
 
-  const result = { eventId: created.id, eventUrl: created.eventUrl, photoAttached };
+  // The speaker photo goes on after the event exists, never in createEvent
+  // itself: a failure here costs only the photo, not the draft or the rest of
+  // the speaker profile that createEvent already saved.
+  let speakerPhotoAttached = false;
+  if (avatarUrl && payload.speakerDetails) {
+    try {
+      log(`Uploading speaker photo from ${avatarUrl}...`);
+      await attachSpeakerPhoto(client, {
+        groupId: await resolveGroupId(),
+        eventId: created.id,
+        avatarUrl,
+        speakerDetails: payload.speakerDetails,
+      });
+      log("Speaker photo attached.");
+      speakerPhotoAttached = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[warn] Speaker photo failed, keeping the speaker profile without it: ${msg}`);
+    }
+  }
+
+  const result = {
+    eventId: created.id,
+    eventUrl: created.eventUrl,
+    photoAttached,
+    speakerPhotoAttached,
+  };
   if (options.onCreated) {
     await options.onCreated({
       event: options.event,
@@ -329,6 +494,8 @@ export interface CreateMeetupDraftFromFileOptions {
   hosts?: number[];
   /** Attach `event.speaker` as Meetup's Pro speaker profile. */
   includeSpeaker?: boolean;
+  /** Also attach the speaker's photo. See `CreateMeetupDraftOptions.includeSpeakerPhoto`. */
+  includeSpeakerPhoto?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -379,6 +546,9 @@ export async function createMeetupDraftFromFile(
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
     ...(options.includeSpeaker !== undefined ? { includeSpeaker: options.includeSpeaker } : {}),
+    ...(options.includeSpeakerPhoto !== undefined
+      ? { includeSpeakerPhoto: options.includeSpeakerPhoto }
+      : {}),
     dryRun: options.dryRun,
     credentials: options.credentials,
     log,
@@ -403,10 +573,17 @@ export interface CreateMeetupDraftsOptions {
     urlname: string;
     hosts?: number[];
     includeSpeaker?: boolean;
+    includeSpeakerPhoto?: boolean;
     timezone?: string;
   }>;
   venues: VenueMap;
-  /** Fallback IANA timezone for groups that name none. See `BuildPayloadInput.timezone`. */
+  /**
+   * The event date is a true instant (see `BuildPayloadInput.timezone`). With a
+   * single group, this is that group's zone when it names none. With several,
+   * it is never applied to them — it would be the wrong zone for all but one —
+   * and each group naming no `timezone` has its zone looked up from Meetup
+   * before any draft is created. Omit it for the legacy wall-time reading.
+   */
   timezone?: string;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
@@ -437,6 +614,11 @@ export type CreateMeetupDraftsResult = {
  * one group failing does not stop the rest. Every outcome is reported, so the
  * caller can retry only the groups that failed. There is no cross-group
  * rollback: on partial failure the drafts that succeeded stay.
+ *
+ * Timezones are settled first, though: when `timezone` is set and several
+ * groups are given, every group without its own `timezone` is looked up from
+ * Meetup before anything is created, and a failed lookup (or a dry run, which
+ * makes no API calls) throws with no draft created.
  */
 export async function createMeetupDrafts(
   options: CreateMeetupDraftsOptions
@@ -446,19 +628,23 @@ export async function createMeetupDrafts(
     throw new Error("createMeetupDrafts called with no groups.");
   }
 
+  const timezones = await resolveDraftTimezones(options, log);
+
   const results: CreateMeetupDraftsResult["results"] = [];
   for (const [index, group] of options.groups.entries()) {
     log(`[${index + 1}/${options.groups.length}] ${group.urlname}`);
+    const timezone = timezones[index];
     try {
       const result = await createMeetupDraft({
         event: options.event,
         groupUrlname: group.urlname,
         venues: options.venues,
-        ...((group.timezone ?? options.timezone) !== undefined
-          ? { timezone: (group.timezone ?? options.timezone) as string }
-          : {}),
+        ...(timezone !== undefined ? { timezone } : {}),
         ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
         ...(group.includeSpeaker !== undefined ? { includeSpeaker: group.includeSpeaker } : {}),
+        ...(group.includeSpeakerPhoto !== undefined
+          ? { includeSpeakerPhoto: group.includeSpeakerPhoto }
+          : {}),
         ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
         ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
         log,
@@ -479,21 +665,110 @@ export async function createMeetupDrafts(
   return { results };
 }
 
+/**
+ * The timezone each group's wall time is written in, aligned with
+ * `options.groups`.
+ *
+ * A group's own `timezone` always wins. Otherwise, with a single group or no
+ * `options.timezone`, it falls back to `options.timezone` as before (unset
+ * being the legacy wall-time reading). A shared timezone across several groups
+ * is right for one of them at most, so there the groups naming no zone get the
+ * one Meetup holds for them instead.
+ */
+async function resolveDraftTimezones(
+  options: CreateMeetupDraftsOptions,
+  log: (message: string) => void
+): Promise<Array<string | undefined>> {
+  const { groups, timezone: shared } = options;
+  if (groups.length === 1 || shared === undefined) {
+    return groups.map((g) => g.timezone ?? shared);
+  }
+
+  const missing = groups.filter((g) => g.timezone === undefined).map((g) => g.urlname);
+  const lookedUp = await lookUpGroupTimezones(missing, options, log);
+  return groups.map((g) => g.timezone ?? lookedUp.get(g.urlname.toLowerCase()));
+}
+
+/**
+ * Ask Meetup for each group's timezone, all or nothing: any group that cannot
+ * be resolved throws before a single draft exists, so a lookup failure never
+ * leaves a partial run behind. Returns zones keyed by lowercased urlname.
+ */
+async function lookUpGroupTimezones(
+  urlnames: string[],
+  options: Pick<CreateMeetupDraftsOptions, "dryRun" | "credentials">,
+  log: (message: string) => void
+): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  // Meetup urlnames are case-insensitive: one lookup per group, however spelled.
+  const unique = urlnames.filter(
+    (u, i) => urlnames.findIndex((v) => v.toLowerCase() === u.toLowerCase()) === i
+  );
+  if (unique.length === 0) return found;
+
+  const quote = (list: string[]) => list.map((u) => JSON.stringify(u)).join(", ");
+  const pinHint = (list: string[]) =>
+    `Add meetup.groupTimezones entries for ${quote(list)} (run \`coopkit-meetup list-groups\` to print them)`;
+
+  if (options.dryRun) {
+    throw new Error(
+      [
+        `Dry run cannot look up the timezone of ${quote(unique)}: it makes no Meetup API calls,`,
+        `and a multi-group run needs each group's own timezone. ${pinHint(unique)},`,
+        "or run without --dry-run to look them up.",
+      ].join(" ")
+    );
+  }
+
+  const failures: Array<{ urlname: string; reason: string }> = [];
+  let client: MeetupClient | undefined;
+  try {
+    client = createMeetupClient(options.credentials);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    for (const urlname of unique) failures.push({ urlname, reason });
+  }
+
+  if (client) {
+    for (const urlname of unique) {
+      try {
+        const info = await fetchGroupInfo(client, urlname);
+        if (info.timezone) found.set(urlname.toLowerCase(), info.timezone);
+        else failures.push({ urlname, reason: "Meetup returned none" });
+      } catch (err) {
+        failures.push({ urlname, reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
+  if (failures.length > 0) {
+    // One cause shared by every group (no credentials, a rejected token) is said once.
+    const clean = (reason: string) => reason.trim().replace(/\.$/, "");
+    const failed = failures.map((f) => f.urlname);
+    const reasons = new Set(failures.map((f) => clean(f.reason)));
+    const detail =
+      reasons.size === 1
+        ? `${quote(failed)} (${[...reasons][0]})`
+        : failures.map((f) => `${JSON.stringify(f.urlname)} (${clean(f.reason)})`).join(", ");
+    throw new Error(
+      `No drafts were created: could not get the timezone of ${detail} from Meetup. ${pinHint(failed)}.`
+    );
+  }
+
+  for (const urlname of unique) {
+    const timezone = found.get(urlname.toLowerCase());
+    log(
+      `[info] Using Meetup's timezone for ${urlname}: ${timezone} (pin it with meetup.groupTimezones)`
+    );
+  }
+  return found;
+}
+
 export interface CreateMeetupDraftsFromFileOptions {
   /** Path to the event markdown file (cppserbia-style: one event per file). */
   eventFile: string;
-  /**
-   * Groups to create the event in, in order, each with its own hosts and its own
-   * timezone. The timezone must be per group: Meetup reads `startDateTime` as
-   * wall time in the *receiving* group's zone, so one shared wall time would put
-   * the event at a different instant in each group.
-   */
-  groups: Array<{
-    urlname: string;
-    hosts?: number[];
-    includeSpeaker?: boolean;
-    timezone?: string;
-  }>;
+  /** Groups to create the event in, in order. Same shape as `createMeetupDrafts`. */
+  groups: CreateMeetupDraftsOptions["groups"];
   /**
    * The config's primary group — the only one whose ids are mirrored into the
    * `event_url` / `event_id` scalars. Deliberately independent of `groups`, so
@@ -501,7 +776,11 @@ export interface CreateMeetupDraftsFromFileOptions {
    */
   primaryGroup?: string;
   venues: VenueMap;
-  /** Fallback IANA timezone for groups that name none. See `BuildPayloadInput.timezone`. */
+  /**
+   * The config's `meetup.timezone`. As in `createMeetupDrafts`: the fallback when
+   * one group is requested, and with several, the groups naming no zone of their
+   * own are looked up on Meetup.
+   */
   timezone?: string;
   dryRun?: boolean;
   credentials?: MeetupCredentials;

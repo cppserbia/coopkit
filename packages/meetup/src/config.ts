@@ -34,14 +34,26 @@ export interface MeetupConfig {
    */
   speakerDetails?: boolean | string[];
   /**
+   * Also give the speaker profile its photo, from `speaker.avatarUrl`. Opt-in,
+   * with the same shape as `speakerDetails`: `true` for every group, or a list
+   * of group urlnames. The photo belongs to the profile, so every group this
+   * covers must also have `speakerDetails`; `loadMeetupConfig` refuses a config
+   * where it does not. See `CreateMeetupDraftOptions.includeSpeakerPhoto`.
+   */
+  speakerPhoto?: boolean | string[];
+  /**
    * Per-group IANA timezone, keyed by group urlname.
    *
-   * **Required when targeting more than one group**, because Meetup has no
-   * single "event time": `startDateTime` is wall time in the *receiving group's*
-   * own zone. Sending one group's wall time to all of them creates a different
-   * instant in each — a session at 16:00Z becomes 11:00 in Chicago but also
-   * 11:00 in Belgrade, seven hours apart. Run `coopkit-meetup list-groups` to
-   * print a ready-to-paste map of what Meetup reports for each of your groups.
+   * Meetup has no single "event time": `startDateTime` is wall time in the
+   * *receiving group's* own zone, so a run targeting more than one group needs
+   * each group's zone. Sending one group's wall time to all of them creates a
+   * different instant in each — a session at 16:00Z becomes 11:00 in Chicago
+   * but also 11:00 in Belgrade, seven hours apart. So `timezone` is never applied
+   * to a multi-group run: a group missing here is looked up from Meetup before
+   * any draft is created. Entries here win and skip the lookup, and a dry run,
+   * which makes no API calls, needs one for every targeted group. Run
+   * `coopkit-meetup list-groups` to print a ready-to-paste map of what Meetup
+   * reports for each of your groups.
    */
   groupTimezones?: Record<string, string>;
 }
@@ -139,6 +151,33 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
       );
     }
   }
+  if (meetup.speakerPhoto !== undefined) {
+    const sp = meetup.speakerPhoto;
+    const ok =
+      typeof sp === "boolean" ||
+      (Array.isArray(sp) && sp.every((g) => typeof g === "string" && g !== ""));
+    if (!ok) {
+      throw new Error(
+        `${resolved}: meetup.speakerPhoto must be true/false or an array of group urlnames.`
+      );
+    }
+    // The photo is attached to the speaker profile, so a group with the photo
+    // but no profile has nothing to attach it to. Fail here rather than at
+    // call time, where it would silently upload nothing.
+    const covered =
+      sp === true ? [meetup.groupUrlname, ...(meetup.groups ?? [])] : sp === false ? [] : sp;
+    const orphaned = covered.filter((g) => !groupAcceptsSpeaker(meetup, g));
+    if (orphaned.length > 0) {
+      const names = orphaned.map((g) => JSON.stringify(g)).join(", ");
+      throw new Error(
+        [
+          `${resolved}: meetup.speakerPhoto covers ${names}, which meetup.speakerDetails does not.`,
+          "The photo is part of the speaker profile: enable speakerDetails for those groups",
+          "or leave them out of speakerPhoto.",
+        ].join(" ")
+      );
+    }
+  }
   if (meetup.groupTimezones !== undefined) {
     const tzs = meetup.groupTimezones;
     if (typeof tzs !== "object" || tzs === null || Array.isArray(tzs)) {
@@ -199,8 +238,15 @@ export interface GroupTarget {
   /** Whether this group accepts Meetup's Pro speaker profile. */
   includeSpeaker: boolean;
   /**
+   * Whether this group opts into the speaker profile's photo. Only takes effect
+   * together with `includeSpeaker`.
+   */
+  includeSpeakerPhoto: boolean;
+  /**
    * IANA timezone this group's wall time is expressed in. Undefined means the
-   * event date is already group-local wall time (the legacy reading).
+   * event date is already group-local wall time (the legacy reading) — except
+   * in a multi-group selection whose config sets `timezone`, where it means
+   * "not configured": `createMeetupDrafts`, given that `timezone`, looks it up.
    */
   timezone?: string;
 }
@@ -213,6 +259,14 @@ export function groupAcceptsSpeaker(config: MeetupConfig, urlname: string): bool
   return sd.some((g) => g.toLowerCase() === urlname.toLowerCase());
 }
 
+/** Does this group opt into the speaker photo? See `MeetupConfig.speakerPhoto`. */
+export function groupAcceptsSpeakerPhoto(config: MeetupConfig, urlname: string): boolean {
+  const sp = config.speakerPhoto;
+  if (sp === undefined || sp === false) return false;
+  if (sp === true) return true;
+  return sp.some((g) => g.toLowerCase() === urlname.toLowerCase());
+}
+
 /**
  * Expand config into the ordered list of groups to create the event in.
  *
@@ -221,6 +275,11 @@ export function groupAcceptsSpeaker(config: MeetupConfig, urlname: string): bool
  * report a group as "CPPTORONTO" while a config says "cpptoronto"). Hosts come
  * from `groupHosts[urlname]` when present, else the `hostNames` override, else
  * `defaultHosts`.
+ *
+ * Timezones come from `groupTimezones[urlname]`. When exactly one group is
+ * selected, `timezone` is the fallback, as it always was. When several are,
+ * there is no fallback: a group without a `groupTimezones` entry gets no
+ * `timezone`, and `createMeetupDrafts` (passed `timezone`) looks it up.
  */
 export function resolveGroupTargets(
   config: MeetupConfig,
@@ -262,30 +321,20 @@ export function resolveGroupTargets(
 
   // One `timezone` shared across several groups is never right: Meetup reads
   // startDateTime in the *receiving* group's zone, so the same wall time is a
-  // different instant per group. Refuse rather than silently placing it at the wrong time.
-  if (selected.length > 1 && config.timezone !== undefined) {
-    const unmapped = selected.filter((u) => !tzByGroup.has(u.toLowerCase()));
-    if (unmapped.length > 0) {
-      const missing = unmapped.map((u) => JSON.stringify(u)).join(", ");
-      throw new Error(
-        [
-          "meetup.timezone alone cannot describe a multi-group run: Meetup interprets",
-          "the event time in each group's own timezone, so one wall time would land at",
-          `a different instant in each. Add meetup.groupTimezones entries for ${missing}`,
-          "(run `coopkit-meetup list-groups` to print them).",
-        ].join(" ")
-      );
-    }
-  }
+  // different instant per group. So it is only a fallback for a single group;
+  // in a multi-group selection an unmapped group is left without a timezone,
+  // for createMeetupDrafts to look up rather than to place at the wrong time.
+  const fallbackTimezone = selected.length > 1 ? undefined : config.timezone;
 
   return selected.map((urlname) => {
     const perGroup = hostsByGroup.get(urlname.toLowerCase());
     const names = perGroup ?? options.hostNames;
-    const timezone = tzByGroup.get(urlname.toLowerCase()) ?? config.timezone;
+    const timezone = tzByGroup.get(urlname.toLowerCase()) ?? fallbackTimezone;
     return {
       urlname,
       hosts: resolveHostIds(config, names),
       includeSpeaker: groupAcceptsSpeaker(config, urlname),
+      includeSpeakerPhoto: groupAcceptsSpeakerPhoto(config, urlname),
       ...(timezone !== undefined ? { timezone } : {}),
     };
   });

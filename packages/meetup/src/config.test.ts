@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   type MeetupConfig,
   groupAcceptsSpeaker,
+  groupAcceptsSpeakerPhoto,
   loadMeetupConfig,
   resolveGroupTargets,
   resolveHostIds,
@@ -192,7 +193,9 @@ describe("resolveGroupTargets", () => {
       groupUrlname: "solo-group",
       venues: { online: "online" },
     });
-    expect(targets).toEqual([{ urlname: "solo-group", hosts: [], includeSpeaker: false }]);
+    expect(targets).toEqual([
+      { urlname: "solo-group", hosts: [], includeSpeaker: false, includeSpeakerPhoto: false },
+    ]);
   });
 
   it("lets an explicit hostNames override apply to groups without a groupHosts entry", () => {
@@ -243,6 +246,129 @@ describe("speakerDetails gating", () => {
   });
 });
 
+describe("speakerPhoto gating", () => {
+  const base: MeetupConfig = { groupUrlname: "a-group", venues: { online: "online" } };
+
+  it("is off when unset, even with speakerDetails on", () => {
+    expect(groupAcceptsSpeakerPhoto({ ...base, speakerDetails: true }, "a-group")).toBe(false);
+  });
+
+  it("is off when explicitly false", () => {
+    expect(groupAcceptsSpeakerPhoto({ ...base, speakerPhoto: false }, "a-group")).toBe(false);
+  });
+
+  it("is on for every group when true", () => {
+    const cfg = { ...base, speakerPhoto: true };
+    expect(groupAcceptsSpeakerPhoto(cfg, "a-group")).toBe(true);
+    expect(groupAcceptsSpeakerPhoto(cfg, "anything-else")).toBe(true);
+  });
+
+  it("is on only for listed groups, case-insensitively", () => {
+    const cfg = { ...base, speakerPhoto: ["CPPTORONTO"] };
+    expect(groupAcceptsSpeakerPhoto(cfg, "cpptoronto")).toBe(true);
+    expect(groupAcceptsSpeakerPhoto(cfg, "cpp-serbia")).toBe(false);
+  });
+
+  it("flows onto resolved group targets", () => {
+    const targets = resolveGroupTargets({
+      ...base,
+      groups: ["b-group", "c-group"],
+      speakerDetails: true,
+      speakerPhoto: ["B-GROUP"],
+    });
+    expect(targets.map((t) => [t.urlname, t.includeSpeaker, t.includeSpeakerPhoto])).toEqual([
+      ["a-group", true, false],
+      ["b-group", true, true],
+      ["c-group", true, false],
+    ]);
+  });
+
+  it("loads speakerPhoto alongside speakerDetails", () => {
+    const cfg = loadMeetupConfig(
+      writeConfig({
+        meetup: {
+          ...BASE,
+          groups: ["cpp-serbia"],
+          speakerDetails: ["chicago-c-cpp-users-group", "cpp-serbia"],
+          speakerPhoto: ["CPP-SERBIA"],
+        },
+      })
+    );
+    expect(cfg.speakerPhoto).toEqual(["CPP-SERBIA"]);
+  });
+
+  it("accepts any speakerPhoto list when speakerDetails is true", () => {
+    const cfg = loadMeetupConfig(
+      writeConfig({ meetup: { ...BASE, speakerDetails: true, speakerPhoto: ["anywhere"] } })
+    );
+    expect(cfg.speakerPhoto).toEqual(["anywhere"]);
+  });
+
+  it("accepts speakerPhoto: false without speakerDetails", () => {
+    const cfg = loadMeetupConfig(writeConfig({ meetup: { ...BASE, speakerPhoto: false } }));
+    expect(cfg.speakerPhoto).toBe(false);
+  });
+
+  it("rejects a malformed speakerPhoto value", () => {
+    expect(() =>
+      loadMeetupConfig(writeConfig({ meetup: { ...BASE, speakerDetails: true, speakerPhoto: 1 } }))
+    ).toThrow(/speakerPhoto must be true\/false or an array of group urlnames/);
+    expect(() =>
+      loadMeetupConfig(
+        writeConfig({ meetup: { ...BASE, speakerDetails: true, speakerPhoto: ["ok", ""] } })
+      )
+    ).toThrow(/speakerPhoto must be true\/false or an array of group urlnames/);
+  });
+
+  // The photo goes on the speaker profile, so speakerPhoto without
+  // speakerDetails for the same group would silently do nothing.
+  it("rejects speakerPhoto: true without speakerDetails", () => {
+    expect(() =>
+      loadMeetupConfig(writeConfig({ meetup: { ...BASE, speakerPhoto: true } }))
+    ).toThrow(
+      /speakerPhoto covers "chicago-c-cpp-users-group", which meetup.speakerDetails does not/
+    );
+  });
+
+  it("rejects speakerPhoto: true when speakerDetails leaves out a configured group", () => {
+    expect(() =>
+      loadMeetupConfig(
+        writeConfig({
+          meetup: {
+            ...BASE,
+            groups: ["cpp-serbia", "CPPTORONTO"],
+            speakerDetails: ["cpptoronto"],
+            speakerPhoto: true,
+          },
+        })
+      )
+    ).toThrow(/speakerPhoto covers "chicago-c-cpp-users-group", "cpp-serbia", which/);
+  });
+
+  it("rejects a speakerPhoto group that speakerDetails does not list", () => {
+    expect(() =>
+      loadMeetupConfig(
+        writeConfig({
+          meetup: {
+            ...BASE,
+            groups: ["cpp-serbia"],
+            speakerDetails: ["cpp-serbia"],
+            speakerPhoto: ["cpp-serbia", "chicago-c-cpp-users-group"],
+          },
+        })
+      )
+    ).toThrow(/speakerPhoto covers "chicago-c-cpp-users-group", which/);
+  });
+
+  it("rejects a speakerPhoto list when speakerDetails is false", () => {
+    expect(() =>
+      loadMeetupConfig(
+        writeConfig({ meetup: { ...BASE, speakerDetails: false, speakerPhoto: ["a-group"] } })
+      )
+    ).toThrow(/speakerPhoto covers "a-group"/);
+  });
+});
+
 describe("per-group timezones", () => {
   const NETWORK: MeetupConfig = {
     groupUrlname: "chicago-c-cpp-users-group",
@@ -275,27 +401,33 @@ describe("per-group timezones", () => {
     expect(targets.find((t) => t.urlname === "cpptoronto")?.timezone).toBe("America/Toronto");
   });
 
-  it("refuses a multi-group run that has only one shared timezone", () => {
+  it("does not spread a shared timezone across a multi-group run", () => {
     // The bug this guards: one wall time sent to groups in different zones is a
-    // different instant in each.
-    expect(() =>
-      resolveGroupTargets({
-        groupUrlname: "chicago-c-cpp-users-group",
-        venues: { online: "online" },
-        groups: ["cpp-serbia"],
-        timezone: "America/Chicago",
-      })
-    ).toThrow(/cannot describe a multi-group run/);
+    // different instant in each. Unmapped groups are left for createMeetupDrafts
+    // to look up, and resolving them is no error (the v0.3.0 network config).
+    const targets = resolveGroupTargets({
+      groupUrlname: "chicago-c-cpp-users-group",
+      venues: { online: "online" },
+      groups: ["cpp-serbia"],
+      timezone: "America/Chicago",
+    });
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", undefined],
+      ["cpp-serbia", undefined],
+    ]);
   });
 
-  it("names the groups missing a timezone", () => {
-    expect(() =>
-      resolveGroupTargets({
-        ...NETWORK,
-        timezone: "America/Chicago",
-        groupTimezones: { "chicago-c-cpp-users-group": "America/Chicago" },
-      })
-    ).toThrow(/"cpp-serbia", "CPPTORONTO"/);
+  it("keeps groupTimezones entries and leaves only the unmapped groups without one", () => {
+    const targets = resolveGroupTargets({
+      ...NETWORK,
+      timezone: "America/Chicago",
+      groupTimezones: { "chicago-c-cpp-users-group": "America/Chicago" },
+    });
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", "America/Chicago"],
+      ["cpp-serbia", undefined],
+      ["CPPTORONTO", undefined],
+    ]);
   });
 
   it("allows a single-group run with only the shared timezone", () => {

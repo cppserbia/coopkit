@@ -51,6 +51,7 @@ export type { ListVenuesOptions, MeetupVenue } from "./list-venues.js";
 export {
   DEFAULT_CONFIG_FILENAME,
   groupAcceptsSpeaker,
+  groupAcceptsSpeakerPhoto,
   loadMeetupConfig,
   resolveGroupTargets,
   resolveHostIds,
