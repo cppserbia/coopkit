@@ -61,8 +61,8 @@ Drop a `coopkit.config.json` at the repo root:
 | --- | --- | --- |
 | `groupUrlname` | yes | Meetup group slug the drafts are created in. |
 | `venues` | yes | Maps frontmatter venue keys to Meetup venue IDs. |
-| `timezone` | no | IANA zone, for a **single**-group config. **Set this if your event dates are true UTC** — see below. |
-| `groupTimezones` | for multi-group | Per-group IANA zone. Required once more than one group is targeted. |
+| `timezone` | no | IANA zone of the group. **Set this if your event dates are true UTC** — see below. A multi-group run never applies it to every group; see [network events](#network-events-one-session-several-groups). |
+| `groupTimezones` | no | Per-group IANA zone for a multi-group run. A group missing here is looked up from Meetup; pin it here to skip the lookup. A dry run needs it. |
 | `hosts` | no | Named Meetup member IDs, so you can refer to hosts by name. |
 | `defaultHosts` | no | Names from `hosts` used when an event names none. |
 
@@ -124,20 +124,34 @@ in a network almost always have different organizers:
 case-insensitively (Meetup urlnames are case-insensitive, and a network may
 report `CPPTORONTO` where your config says `cpptoronto`).
 
-> **`groupTimezones` is required for a multi-group run, and this is not a style
-> preference.** Meetup has no single "event time": `startDateTime` is wall time in
-> the *receiving group's* own zone, with no offset accepted. Send one group's wall
+> **Every group gets its own timezone, and this is not a style preference.**
+> Meetup has no single "event time": `startDateTime` is wall time in the
+> *receiving group's* own zone, with no offset accepted. Send one group's wall
 > time to every group and you create a **different instant in each** — a session at
 > 16:00Z becomes 11:00 in Chicago and also 11:00 in Belgrade, seven hours apart.
-> A multi-group run with only the shared `timezone` therefore **fails** rather than
-> silently placing it at the wrong time. Run `coopkit-meetup list-groups` to print the map:
+>
+> So when a run targets more than one group and `timezone` is set, `timezone` is
+> not applied to the groups. Each uses its `groupTimezones` entry, and a group
+> without one has its timezone **looked up from Meetup** before any draft is
+> created:
+>
+> ```
+> [info] Using Meetup's timezone for cpp-serbia: Europe/Belgrade (pin it with meetup.groupTimezones)
+> ```
+>
+> If any lookup fails, the run stops before creating anything and names the
+> groups to pin. A `--dry-run` makes no API calls, so it cannot look anything up:
+> it needs a `groupTimezones` entry for every group it targets, and fails with a
+> message saying so otherwise. `coopkit-meetup list-groups` prints the map to paste:
 >
 > ```bash
 > bunx coopkit-meetup list-groups
 > ```
 >
-> `timezone` remains valid for a single-group config, and a narrowed run
-> (`--groups cpp-serbia`) still accepts it.
+> A run that targets one group (no `--groups`, or `--groups cpp-serbia`) uses that
+> group's `groupTimezones` entry if it has one, else `timezone`, as before. Without
+> `timezone` nothing is looked up: a group with no `groupTimezones` entry keeps the
+> wall-time reading described in [Timezones](#timezones--read-this-if-your-dates-are-utc).
 
 ```bash
 # every group in the config
@@ -381,3 +395,5 @@ Required secrets for both: `MEETUP_CLIENT_KEY`, `MEETUP_MEMBER_ID`, `MEETUP_SIGN
 | `Meetup group not found for urlname "…"` | `groupUrlname` is wrong or the member isn't an organizer of the group. |
 | `OAuth2 token exchange failed: 401` | Private key, signing-key ID, or client key mismatch. |
 | `createGroupEventPhoto returned no photo or uploadUrl` | Meetup rejected the image. Check the URL is reachable and < ~10 MB. |
+| `Dry run cannot look up the timezone of "…"` | A multi-group dry run with `timezone` set needs a `groupTimezones` entry for every targeted group. Paste them from `list-groups`, or run without `--dry-run`. |
+| `No drafts were created: could not get the timezone of "…"` | Meetup did not return those groups' timezones (check the urlname and the account's access), so nothing was created. Pin them in `groupTimezones`. |

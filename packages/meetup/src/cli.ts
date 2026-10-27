@@ -203,8 +203,8 @@ const createFromJsonCmd = defineCommand({
     const requested = parseHostArg(args.groups);
     const multiGroup = requested !== undefined;
     // Without --groups only groupUrlname is created, so resolve only that one,
-    // as `create` does: resolving every configured group would apply the
-    // multi-group timezone check to a run that targets a single group.
+    // as `create` does: it is a single-group selection, so meetup.timezone
+    // applies to it directly rather than being treated as a multi-group run.
     const only = !multiGroup
       ? [config.groupUrlname]
       : !(requested.length === 1 && requested[0]?.toLowerCase() === "all")
@@ -235,8 +235,9 @@ const createFromJsonCmd = defineCommand({
       return;
     }
 
-    // `targets` carry a per-group timezone; config.timezone stays only as the
-    // fallback for a single-group config that names no groupTimezones.
+    // `targets` carry each group's groupTimezones entry. Passing config.timezone
+    // marks the dates as true instants: it is the fallback for a single selected
+    // group, and with several, createMeetupDrafts looks up the unmapped ones.
     const result = await createMeetupDrafts({
       event,
       groups: targets,

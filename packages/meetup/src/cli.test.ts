@@ -2,7 +2,7 @@
 // verifies arg parsing, config loading, and the --output result file used by
 // the GitHub Action to surface event-id / event-url.
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,11 +25,22 @@ const EVENT = JSON.stringify({
   description: "Body.",
 });
 
-async function run(args: string[]): Promise<{ code: number; stdout: string }> {
+async function run(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const code = await proc.exited;
-  return { code, stdout };
+  return { code, stdout, stderr };
+}
+
+/** The dry-run payloads a multi-group run prints, one pretty-printed object each. */
+function payloads(stdout: string): Array<{ groupUrlname: string; startDateTime: string }> {
+  return stdout
+    .trim()
+    .split(/\n(?=\{)/)
+    .map((chunk) => JSON.parse(chunk));
 }
 
 describe("create-from-json --output (dry-run)", () => {
@@ -79,8 +90,8 @@ describe("create-from-json --output (dry-run)", () => {
   });
 });
 
-// A multi-group config. Each group needs its own timezone, or resolveGroupTargets
-// refuses the run -- see "per-group timezones" in config.test.ts.
+// A multi-group config with every group's timezone pinned, so a dry run needs no
+// lookup -- see "per-group timezones" in config.test.ts.
 const MULTI_CONFIG = JSON.stringify({
   meetup: {
     groupUrlname: "cpp-serbia",
@@ -139,15 +150,56 @@ describe("create-from-json with a shared-timezone network config", () => {
     }
   });
 
-  it("still refuses an explicit multi-group run without groupTimezones", async () => {
+  it("refuses a dry multi-group run that would need a timezone lookup", async () => {
+    // A real run looks the zones up from Meetup (see create-drafts.test.ts);
+    // a dry run makes no API calls, so it must say so rather than guess.
     const dir = scratch();
     try {
       const config = join(dir, "coopkit.config.json");
       const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
       writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
       writeFileSync(event, EVENT);
 
-      const { code } = await run([
+      const { code, stdout, stderr } = await run([
+        "create-from-json",
+        "--groups",
+        "all",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        event,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(
+        'Dry run cannot look up the timezone of "chicago-c-cpp-users-group", "cpp-serbia", "CPPTORONTO"'
+      );
+      expect(stderr).toContain("or run without --dry-run to look them up.");
+      expect(stdout).toBe("");
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dry-runs every group once groupTimezones pins them, one instant in each", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const pinned = JSON.parse(SHARED_TZ_NETWORK_CONFIG);
+      pinned.meetup.groupTimezones = {
+        "chicago-c-cpp-users-group": "America/Chicago",
+        "cpp-serbia": "Europe/Belgrade",
+        CPPTORONTO: "America/Toronto",
+      };
+      writeFileSync(config, JSON.stringify(pinned));
+      writeFileSync(event, EVENT);
+
+      const { code, stdout } = await run([
         "create-from-json",
         "--groups",
         "all",
@@ -157,7 +209,40 @@ describe("create-from-json with a shared-timezone network config", () => {
         event,
       ]);
 
-      expect(code).not.toBe(0);
+      expect(code).toBe(0);
+      // 16:00Z on 2026-05-09: CDT -5, CEST +2, EDT -4.
+      expect(payloads(stdout).map((p) => [p.groupUrlname, p.startDateTime])).toEqual([
+        ["chicago-c-cpp-users-group", "2026-05-09T11:00:00"],
+        ["cpp-serbia", "2026-05-09T18:00:00"],
+        ["CPPTORONTO", "2026-05-09T12:00:00"],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps converting a narrowed single-group --groups run with meetup.timezone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stdout } = await run([
+        "create-from-json",
+        "--groups",
+        "chicago-c-cpp-users-group",
+        "--config",
+        config,
+        "--dry-run",
+        event,
+      ]);
+
+      expect(code).toBe(0);
+      expect(payloads(stdout).map((p) => [p.groupUrlname, p.startDateTime])).toEqual([
+        ["chicago-c-cpp-users-group", "2026-05-09T11:00:00"],
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

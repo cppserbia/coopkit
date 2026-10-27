@@ -17,6 +17,25 @@ const GROUP_INFO_QUERY = `
   }
 `;
 
+/**
+ * Read one group's canonical urlname, name and timezone. Throws when the API
+ * call fails; a group Meetup does not return comes back with nulls.
+ */
+export async function fetchGroupInfo(
+  client: MeetupClient,
+  urlname: string
+): Promise<MeetupGroupInfo> {
+  const data = await client.graphql<{ groupByUrlname: MeetupGroupInfo | null }>(GROUP_INFO_QUERY, {
+    urlname,
+  });
+  const group = data.groupByUrlname;
+  return {
+    urlname: group?.urlname ?? urlname,
+    name: group?.name ?? null,
+    timezone: group?.timezone ?? null,
+  };
+}
+
 export interface ListGroupsOptions {
   urlnames: string[];
   client?: MeetupClient;
@@ -37,16 +56,7 @@ export async function listGroups(options: ListGroupsOptions): Promise<MeetupGrou
   const out: MeetupGroupInfo[] = [];
   for (const urlname of options.urlnames) {
     try {
-      const data = await client.graphql<{ groupByUrlname: MeetupGroupInfo | null }>(
-        GROUP_INFO_QUERY,
-        { urlname }
-      );
-      const group = data.groupByUrlname;
-      out.push({
-        urlname: group?.urlname ?? urlname,
-        name: group?.name ?? null,
-        timezone: group?.timezone ?? null,
-      });
+      out.push(await fetchGroupInfo(client, urlname));
     } catch {
       out.push({ urlname, name: null, timezone: null });
     }
