@@ -70,9 +70,10 @@ export interface EventFrontmatter {
   /**
    * Every group this event has been created in, including the one mirrored by
    * the `event_url` / `event_id` scalars above. Written back by
-   * `@coopkit/meetup` when one event is cross-posted to several groups, and
-   * read as the per-group idempotency record: a group listed here is never
-   * created again.
+   * `@coopkit/meetup` when one event is cross-posted to several groups (and
+   * kept up to date by a single-group create once the list exists), and read
+   * as the per-group idempotency record: a group listed here is never created
+   * again.
    *
    * Pure bookkeeping — it describes where the event was published, not what
    * the event is, so it is deliberately absent from `NormalizedEvent`.

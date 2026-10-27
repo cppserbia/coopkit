@@ -61,8 +61,8 @@ Drop a `coopkit.config.json` at the repo root:
 | --- | --- | --- |
 | `groupUrlname` | yes | Meetup group slug the drafts are created in. |
 | `venues` | yes | Maps frontmatter venue keys to Meetup venue IDs. |
-| `timezone` | no | IANA zone of the group. **Set this if your event dates are true UTC** — see below. A multi-group run never applies it to every group; see [network events](#network-events-one-session-several-groups). |
-| `groupTimezones` | no | Per-group IANA zone for a multi-group run. A group missing here is looked up from Meetup; pin it here to skip the lookup. A dry run needs it. |
+| `timezone` | no | IANA zone of `groupUrlname`. **Set this if your event dates are true UTC** — see below. It is only applied when a run targets `groupUrlname` alone, never to another group; see [network events](#network-events-one-session-several-groups). |
+| `groupTimezones` | no | Per-group IANA zone for a run that targets another group than `groupUrlname`, or several. A group missing here is looked up from Meetup; pin it here to skip the lookup. A dry run needs it. |
 | `hosts` | no | Named Meetup member IDs, so you can refer to hosts by name. |
 | `defaultHosts` | no | Names from `hosts` used when an event names none. |
 
@@ -130,10 +130,12 @@ report `CPPTORONTO` where your config says `cpptoronto`).
 > time to every group and you create a **different instant in each** — a session at
 > 16:00Z becomes 11:00 in Chicago and also 11:00 in Belgrade, seven hours apart.
 >
-> So when a run targets more than one group and `timezone` is set, `timezone` is
-> not applied to the groups. Each uses its `groupTimezones` entry, and a group
-> without one has its timezone **looked up from Meetup** before any draft is
-> created:
+> So `timezone`, which is `groupUrlname`'s zone, is only applied when a run
+> targets `groupUrlname` alone. When a run targets more than one group, or any
+> other group alone (`--groups cpp-serbia`), and `timezone` is set, `timezone`
+> is not applied to the groups. Each uses its `groupTimezones` entry, and a
+> group without one has its timezone **looked up from Meetup** before any draft
+> is created:
 >
 > ```
 > [info] Using Meetup's timezone for cpp-serbia: Europe/Belgrade (pin it with meetup.groupTimezones)
@@ -141,16 +143,21 @@ report `CPPTORONTO` where your config says `cpptoronto`).
 >
 > If any lookup fails, the run stops before creating anything and names the
 > groups to pin. A `--dry-run` makes no API calls, so it cannot look anything up:
-> it needs a `groupTimezones` entry for every group it targets, and fails with a
-> message saying so otherwise. `coopkit-meetup list-groups` prints the map to paste:
+> it needs a `groupTimezones` entry for every group that would be looked up, and
+> fails with a message saying so otherwise. `coopkit-meetup list-groups` prints
+> the map to paste:
 >
 > ```bash
 > bunx coopkit-meetup list-groups
 > ```
 >
-> A run that targets one group (no `--groups`, or `--groups cpp-serbia`) uses that
-> group's `groupTimezones` entry if it has one, else `timezone`, as before. Without
-> `timezone` nothing is looked up: a group with no `groupTimezones` entry keeps the
+> A run that targets `groupUrlname` alone (no `--groups`, or `--groups` naming
+> only it) uses its `groupTimezones` entry if it has one, else `timezone`, as
+> before. Narrowing `--groups` to one *other* group does not make `timezone` its
+> zone: with `groupUrlname: chicago-c-cpp-users-group`, `--groups cpp-serbia`
+> uses cpp-serbia's `groupTimezones` entry or looks it up, exactly as
+> `--groups all` would, and a dry run of it needs the entry. Without `timezone`
+> nothing is looked up: a group with no `groupTimezones` entry keeps the
 > wall-time reading described in [Timezones](#timezones--read-this-if-your-dates-are-utc).
 
 ```bash
@@ -164,7 +171,7 @@ bunx coopkit-meetup create-from-json --groups "cpp-serbia,CPPTORONTO" event.json
 Both `create` and `create-from-json` take `--groups`. Without it only
 `groupUrlname` is used, and `--output` keeps its original single-event shape —
 so existing setups are unaffected. With `--groups`, `--output` gets a per-group
-breakdown instead:
+breakdown instead, under one overall `status`:
 
 ```json
 {
@@ -175,6 +182,12 @@ breakdown instead:
   ]
 }
 ```
+
+The overall `status` is `partial` when any group failed; otherwise it is what
+the groups agree on — `created`, `dry-run`, or `skipped` (every group was
+already recorded, so nothing was done) — or `mixed` when they succeeded in
+different ways, typically a retry where some groups were `skipped` as already
+recorded and the rest `created`.
 
 Groups are processed **sequentially**, and one group failing does not stop the
 others — every outcome is reported so you can retry just the failures. The exit
@@ -209,7 +222,7 @@ venues:
 # after `create --groups all`, with groupUrlname: cpp-serbia
 ---
 title: Refactoring C++ Today
-date: 2026-08-22T16:00:00Z
+date: 2026-08-22T16:00:00.000Z
 duration: PT1H30M
 venues:
   - online
@@ -225,27 +238,49 @@ meetup_events:
 ---
 ```
 
+The write-back re-serializes the whole frontmatter, as the single-group
+write-back always has: dates come back in full ISO form
+(`2026-08-22T16:00:00Z` becomes `2026-08-22T16:00:00.000Z`), quoting may change,
+and **YAML comments in the frontmatter are dropped**. Keep notes in the body, or
+as an extra key on a `meetup_events` row (see below).
+
 The `meetup_events` contract:
 
 - One row per group the event exists in: `group`, `event_id` (a **string**, so a
   large id round-trips through YAML byte-for-byte), and `event_url` when the API
-  reported one.
-- It is the **complete** record and includes the primary group. `event_url` /
-  `event_id` stay as a mirror of the primary group's row, for adopter sites and
-  workflows that read them. A secondary group's id is never written to those
-  scalars: that would make a later plain `create` skip the file and so never
-  create the primary event at all, and would point a site's "Register on Meetup"
-  link at the wrong group.
+  reported one. Any other key you add to a row (a `note:`, say) is kept when the
+  list is rewritten.
+- Once a file has it, it is the **complete** record and includes the primary
+  group: a `--groups` run writes a row for each group it creates, and a plain
+  `create` (no `--groups`) adds its own row too. A plain `create` never *adds*
+  the list to a file that has none, so a file that only ever sees plain creates
+  gets exactly the v0.3.0 write-back, `event_url` and `event_id` and nothing
+  else. `event_url` / `event_id` stay as a mirror of the primary group's row, for
+  adopter sites and workflows that read them. A `--groups` run never writes a
+  secondary group's id to those scalars: that would make a later plain `create`
+  skip the file and so never create the primary event at all, and would point a
+  site's "Register on Meetup" link at the wrong group.
 - A group listed here is never created again. It is reported as
   `{"ok": true, "status": "skipped", "reason": "…"}` in `--output` — `reason`
   appears only in the per-group shape.
-- **No migration needed** for files written before `meetup_events` existed: the
-  group is read out of the legacy `event_url`, which already names it.
+- **No migration needed** for files written before `meetup_events` existed: a
+  numeric `event_id` counts for the group its `event_url` names (a localized URL
+  such as `https://www.meetup.com/en-AU/cpp-serbia/events/…` included), or for
+  `groupUrlname` when there is no Meetup event URL to read. If the URL names a
+  group that is not in your config — typically an old urlname of a group that
+  has since been renamed — the run stops before creating anything rather than
+  guess: record the event in `meetup_events` under the group it belongs to, with
+  the same `event_id`, and re-run.
 - The file is written after **each** group, not once at the end, so a failure
-  halfway through still leaves the groups that succeeded recorded on disk.
+  halfway through still leaves the groups that succeeded recorded on disk. If
+  that write itself fails (a read-only file, a full disk), the run stops at once
+  and exits non-zero, naming the draft it just created — group, id and URL — and
+  the row to add by hand. No further group is attempted: its draft could not be
+  recorded either, and the next run would create it again.
 - A malformed hand-edited row (no `group`, a non-numeric `event_id`) is an
-  error, not a warning. Ignoring a typo would silently create a duplicate draft
-  — the exact failure the record exists to prevent.
+  error, not a warning, and so are two rows giving one group different
+  `event_id`s. Ignoring a typo would silently create a duplicate draft — the
+  exact failure the record exists to prevent. Two identical rows are merged.
 - When every requested group is already recorded, nothing is written at all, so
   "the file did not change" keeps meaning "no work was done".
 
@@ -379,9 +414,14 @@ bunx coopkit-meetup create --host "Rob Douglas" events/2026-04-29-My-Event.md
 bunx coopkit-meetup create --groups all events/2026-04-29-My-Event.md
 ```
 
-Idempotent. Writes `event_url` + `event_id` back into the file's frontmatter on
-success, and with `--groups` a `meetup_events` list that makes the idempotency
-per-group — see [Network events](#network-events-one-session-several-groups).
+Idempotent. Without `--groups` it works exactly as in v0.3.0: a numeric
+`event_id` in the frontmatter means the event exists, and the file is skipped
+(`[skip] … already has event_id=…; nothing to do.`) whichever group that id
+belongs to; so is a file whose `meetup_events` lists `groupUrlname`. On success
+it writes `event_url` + `event_id` back into the frontmatter, plus its
+`meetup_events` row when the file already has that list. With `--groups`,
+idempotency is per group and `meetup_events` is the record — see
+[Network events](#network-events-one-session-several-groups).
 
 ### From a JSON input (manual / form-driven)
 
@@ -450,6 +490,8 @@ await createMeetupDraft({
   },
 });
 ```
+
+For several groups, `createMeetupDrafts` (any source) and `createMeetupDraftsFromFile` (file-per-event) are the library side of `--groups`. `createMeetupDraftsFromFile` needs `primaryGroup`, your `groupUrlname`: it owns the `event_url` / `event_id` scalars, a legacy `event_id` with no readable URL is attributed to it, and `timezone` is its zone. Pass `primaryGroup` to `createMeetupDrafts` too when its `timezone` is one group's zone, so a lone other group gets its own. An `onCreated` that cannot persist what it was given can throw `DraftNotRecordedError` to stop a `createMeetupDrafts` run at that group instead of creating the rest unrecorded; any other error it throws is reported as that group's failure and the run goes on.
 
 Lower-level building blocks (`createMeetupClient`, `buildCreateEventPayload`, `resolveVenueId`, `listVenues`) are also exported.
 
@@ -523,7 +565,11 @@ Required secrets for both: `MEETUP_CLIENT_KEY`, `MEETUP_MEMBER_ID`, `MEETUP_SIGN
 | `Meetup group not found for urlname "…"` | `groupUrlname` is wrong or the member isn't an organizer of the group. |
 | `OAuth2 token exchange failed: 401` | Private key, signing-key ID, or client key mismatch. |
 | `createGroupEventPhoto returned no photo or uploadUrl` | Meetup rejected the image. Check the URL is reachable and < ~10 MB. |
-| `Dry run cannot look up the timezone of "…"` | A multi-group dry run with `timezone` set needs a `groupTimezones` entry for every targeted group. Paste them from `list-groups`, or run without `--dry-run`. |
+| `Dry run cannot look up the timezone of "…"` | A dry run with `timezone` set, targeting several groups or a group other than `groupUrlname`, needs a `groupTimezones` entry for each of them. Paste them from `list-groups`, or run without `--dry-run`. |
 | `No drafts were created: could not get the timezone of "…"` | Meetup did not return those groups' timezones (check the urlname and the account's access), so nothing was created. Pin them in `groupTimezones`. |
+| `event_id=… has an event_url naming group "…", which is not one of …` | A `--groups` run found a legacy `event_url` / `event_id` pair for a group outside your config (often a renamed urlname). Nothing was created. Add a `meetup_events` row for the group the event belongs to, with that `event_id`, and re-run. |
+| `event_id=… cannot be attributed to a Meetup group` | Library use only: a numeric `event_id` without a Meetup `event_url`, and no `primaryGroup` / `assumedGroup` to give it to. Record it in `meetup_events` with its group. |
+| `meetup_events[…] and meetup_events[…] … both record group "…", with different event ids` | Two rows disagree about one group. Keep the row of the draft that should exist, delete the other, and re-run. |
+| `Created Meetup draft … but could not record it in …` | The draft exists, but the event file could not be written, so the run stopped there. Add the `meetup_events` row printed in the message by hand (and fix the file's permissions) before re-running, or the next run creates that draft again. |
 | `meetup.speakerPhoto covers "…", which meetup.speakerDetails does not` | `speakerPhoto` names a group with no speaker profile to attach the photo to. Add the group to `speakerDetails`, or leave it out of `speakerPhoto`. |
 | `[warn] Speaker photo failed, keeping the speaker profile without it` | The draft and profile were created; only the headshot is missing. The rest of the message says which step failed. Add the photo in Meetup's editor. |

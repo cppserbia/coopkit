@@ -34,7 +34,8 @@ type MultiGroupResult = {
 
 /**
  * Collapse per-group outcomes into one status: "partial" if any group failed,
- * otherwise whatever the groups agree on ("dry-run", "created", "skipped").
+ * otherwise whatever the groups agree on ("dry-run", "created", "skipped"), or
+ * "mixed" when they succeeded differently (some created, some already recorded).
  * Reporting a dry run as "created" would be a lie a caller might act on.
  */
 function aggregateStatus(result: MultiGroupResult): string {
