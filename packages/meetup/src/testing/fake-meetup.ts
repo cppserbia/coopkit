@@ -28,6 +28,11 @@ export interface FakeMeetupOptions {
   failEditEvent?: boolean;
   /** Photo ID createGroupEventPhoto hands back for non-main photos. */
   speakerPhotoId?: string;
+  /**
+   * Timezone groupByUrlname reports, by group urlname (case-insensitive). A
+   * group not listed reports none, as Meetup does for a group it cannot read.
+   */
+  groupTimezones?: Record<string, string>;
   /** Group urlnames (case-insensitive) whose createEvent returns no event and an error. */
   failCreateEventIn?: string[];
   /** ID of the first event createEvent hands out; each later one counts up. Default 900001. */
@@ -56,8 +61,19 @@ export function createFakeMeetup(options: FakeMeetupOptions = {}) {
 
   function answer(op: (typeof GQL_FIELDS)[number], input: Record<string, unknown>): unknown {
     switch (op) {
-      case "groupByUrlname":
-        return { id: "4242" };
+      case "groupByUrlname": {
+        // One answer for both queries that use it: the id lookup before a photo
+        // upload, and the timezone lookup (GroupInfo) of a multi-group run.
+        const timezone = Object.entries(options.groupTimezones ?? {}).find(
+          ([group]) => lower(group) === lower(input.urlname)
+        )?.[1];
+        return {
+          id: "4242",
+          urlname: input.urlname,
+          name: input.urlname,
+          timezone: timezone ?? null,
+        };
+      }
       case "createEvent": {
         if ((options.failCreateEventIn ?? []).some((g) => lower(g) === lower(input.groupUrlname))) {
           return {

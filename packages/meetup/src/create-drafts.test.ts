@@ -479,6 +479,63 @@ describe("timezone lookup for a multi-group run with a shared timezone", () => {
     ).toEqual(["2026-08-22T11:00:00", "2026-08-22T18:00:00"]);
   });
 
+  it("looks up a lone group that is not primaryGroup instead of using the shared zone", async () => {
+    // `timezone` is the primary's (Chicago); cpp-serbia alone must get its own.
+    const calls = stubMeetup(MEETUP_ZONES);
+    const logs: string[] = [];
+    await createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "cpp-serbia" }],
+      venues: { ...VENUES },
+      timezone: "America/Chicago",
+      primaryGroup: "chicago-c-cpp-users-group",
+      credentials,
+      log: (m) => logs.push(m),
+    });
+
+    expect(calls.flatMap((c) => (c.kind === "group" ? [c.urlname] : []))).toEqual(["cpp-serbia"]);
+    expect(createdStarts(calls)).toEqual({ "cpp-serbia": "2026-08-22T18:00:00" });
+    expect(logs).toContain(
+      "[info] Using Meetup's timezone for cpp-serbia: Europe/Belgrade (pin it with meetup.groupTimezones)"
+    );
+  });
+
+  it("refuses a dry run of a lone non-primary group, naming it", async () => {
+    const calls = stubMeetup(MEETUP_ZONES);
+    const run = createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "cpp-serbia" }],
+      venues: { ...VENUES },
+      timezone: "America/Chicago",
+      primaryGroup: "chicago-c-cpp-users-group",
+      dryRun: true,
+      credentials,
+      log: () => {},
+    });
+
+    await expect(run).rejects.toThrow(
+      'Dry run cannot look up the timezone of "cpp-serbia": it makes no Meetup API calls, and that group needs its own timezone: the shared one is not applied to it.'
+    );
+    await expect(run).rejects.toThrow(/or run without --dry-run to look it up\.$/);
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps the shared timezone for primaryGroup alone, matched case-insensitively", async () => {
+    const calls = stubMeetup(MEETUP_ZONES);
+    await createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "Chicago-C-Cpp-Users-Group" }],
+      venues: { ...VENUES },
+      timezone: "America/Chicago",
+      primaryGroup: "chicago-c-cpp-users-group",
+      credentials,
+      log: () => {},
+    });
+
+    expect(calls.some((c) => c.kind === "group")).toBe(false);
+    expect(createdStarts(calls)).toEqual({ "Chicago-C-Cpp-Users-Group": "2026-08-22T11:00:00" });
+  });
+
   it("keeps using the shared timezone for a single group, with no lookup", async () => {
     const calls = stubMeetup(MEETUP_ZONES);
     await createMeetupDrafts({

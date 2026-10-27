@@ -752,6 +752,125 @@ describe("create without --groups keeps v0.3.0's skip rule", () => {
   });
 });
 
+describe("timezone of a lone --groups target", () => {
+  it("create --groups <another group> --dry-run refuses rather than use the primary's zone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code, stdout, stderr } = await run([
+        "create",
+        "--groups",
+        "cpp-serbia",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('Dry run cannot look up the timezone of "cpp-serbia"');
+      expect(stderr).toContain("or run without --dry-run to look it up.");
+      expect(stdout).toBe("");
+      expect(existsSync(out)).toBe(false);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create-from-json --groups <another group> --dry-run refuses too", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stdout, stderr } = await run([
+        "create-from-json",
+        "--groups",
+        "cpp-serbia",
+        "--config",
+        config,
+        "--dry-run",
+        event,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('Dry run cannot look up the timezone of "cpp-serbia"');
+      expect(stdout).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create-from-json --groups <another group> looks its zone up on a real run", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stderr, calls } = await runAgainstFakeMeetup(
+        ["create-from-json", "--groups", "cpp-serbia", "--config", config, event],
+        dir,
+        { groupTimezones: { "cpp-serbia": "Europe/Belgrade" } }
+      );
+
+      expect(code).toBe(0);
+      expect(stderr).toContain(
+        "[info] Using Meetup's timezone for cpp-serbia: Europe/Belgrade (pin it with meetup.groupTimezones)"
+      );
+      // 16:00Z on 2026-05-09 is 18:00 in Belgrade (CEST), not Chicago's 11:00.
+      const created = calls.filter((c) => c.op === "createEvent").map((c) => c.input);
+      expect(created.map((i) => [i?.groupUrlname, i?.startDateTime])).toEqual([
+        ["cpp-serbia", "2026-05-09T18:00:00"],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create without --groups still converts with meetup.timezone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code, stdout } = await run([
+        "create",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "dry-run" });
+      const payload = JSON.parse(stdout);
+      expect([payload.groupUrlname, payload.startDateTime]).toEqual([
+        "chicago-c-cpp-users-group",
+        "2026-05-09T11:00:00",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // Root can write a 0444 file, so the failure this needs cannot be staged there.
 const isRoot = process.getuid?.() === 0;
 

@@ -201,13 +201,14 @@ const createCmd = defineCommand({
     }
 
     // `targets` carry each group's groupTimezones entry. Passing config.timezone
-    // marks the dates as true instants: it is the fallback for a single selected
-    // group, and with several, createMeetupDraftsFromFile looks up the unmapped ones.
+    // marks the dates as true instants: it is the fallback for the primary group
+    // selected alone, and every other unmapped group is looked up.
     const result = await createMeetupDraftsFromFile({
       eventFile: args.eventFile,
       groups: targets,
       // Always the config's primary group, never whichever group --groups
-      // happens to name first: the scalars must keep pointing at one group.
+      // happens to name first: the scalars must keep pointing at one group, and
+      // config.timezone is that group's zone.
       primaryGroup: config.groupUrlname,
       // So a legacy event_url naming a configured group this run leaves out is
       // attributed to it rather than refused as unknown.
@@ -308,13 +309,15 @@ const createFromJsonCmd = defineCommand({
     }
 
     // `targets` carry each group's groupTimezones entry. Passing config.timezone
-    // marks the dates as true instants: it is the fallback for a single selected
-    // group, and with several, createMeetupDrafts looks up the unmapped ones.
+    // marks the dates as true instants: it is the fallback for the primary group
+    // selected alone, and createMeetupDrafts looks up every other unmapped group
+    // (primaryGroup is what tells it a lone --groups target is not the primary).
     const result = await createMeetupDrafts({
       event,
       groups: targets,
       venues: config.venues,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      primaryGroup: config.groupUrlname,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);

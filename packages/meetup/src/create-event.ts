@@ -653,12 +653,20 @@ export interface CreateMeetupDraftsOptions {
   venues: VenueMap;
   /**
    * The event date is a true instant (see `BuildPayloadInput.timezone`). With a
-   * single group, this is that group's zone when it names none. With several,
-   * it is never applied to them — it would be the wrong zone for all but one —
-   * and each group naming no `timezone` has its zone looked up from Meetup
-   * before any draft is created. Omit it for the legacy wall-time reading.
+   * single group, this is that group's zone when it names none — unless
+   * `primaryGroup` says it belongs to another group. With several, it is never
+   * applied to them — it would be the wrong zone for all but one — and each
+   * group naming no `timezone` has its zone looked up from Meetup before any
+   * draft is created. Omit it for the legacy wall-time reading.
    */
   timezone?: string;
+  /**
+   * The group `timezone` belongs to (the config's `groupUrlname`). With it, a
+   * run of one *other* group naming no `timezone` gets that group's zone looked
+   * up, exactly as in a multi-group run, rather than the primary's zone. Without
+   * it, a run of one group falls back to `timezone` whichever group it is.
+   */
+  primaryGroup?: string;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -692,9 +700,10 @@ export type CreateMeetupDraftsResult = {
  * once, with no further group attempted.
  *
  * Timezones are settled first, though: when `timezone` is set and several
- * groups are given, every group without its own `timezone` is looked up from
- * Meetup before anything is created, and a failed lookup (or a dry run, which
- * makes no API calls) throws with no draft created.
+ * groups are given (or one group other than `primaryGroup`), every group
+ * without its own `timezone` is looked up from Meetup before anything is
+ * created, and a failed lookup (or a dry run, which makes no API calls) throws
+ * with no draft created.
  */
 export async function createMeetupDrafts(
   options: CreateMeetupDraftsOptions
@@ -747,18 +756,24 @@ export async function createMeetupDrafts(
  * The timezone each group's wall time is written in, aligned with
  * `options.groups`.
  *
- * A group's own `timezone` always wins. Otherwise, with a single group or no
- * `options.timezone`, it falls back to `options.timezone` as before (unset
- * being the legacy wall-time reading). A shared timezone across several groups
- * is right for one of them at most, so there the groups naming no zone get the
- * one Meetup holds for them instead.
+ * A group's own `timezone` always wins. Otherwise, with no `options.timezone`,
+ * or a single group that is the primary (or any single group, when no
+ * `primaryGroup` is given), it falls back to `options.timezone` as before (unset
+ * being the legacy wall-time reading). A shared timezone is right for one group
+ * at most, so everywhere else the groups naming no zone get the one Meetup
+ * holds for them instead.
  */
 async function resolveDraftTimezones(
   options: CreateMeetupDraftsOptions,
   log: (message: string) => void
 ): Promise<Array<string | undefined>> {
-  const { groups, timezone: shared } = options;
-  if (groups.length === 1 || shared === undefined) {
+  const { groups, timezone: shared, primaryGroup } = options;
+  const [only] = groups;
+  const sharedIsTheGroups =
+    groups.length === 1 &&
+    only !== undefined &&
+    (primaryGroup === undefined || only.urlname.toLowerCase() === primaryGroup.toLowerCase());
+  if (shared === undefined || sharedIsTheGroups) {
     return groups.map((g) => g.timezone ?? shared);
   }
 
@@ -789,11 +804,14 @@ async function lookUpGroupTimezones(
     `Add meetup.groupTimezones entries for ${quote(list)} (run \`coopkit-meetup list-groups\` to print them)`;
 
   if (options.dryRun) {
+    const one = unique.length === 1;
     throw new Error(
       [
         `Dry run cannot look up the timezone of ${quote(unique)}: it makes no Meetup API calls,`,
-        `and a multi-group run needs each group's own timezone. ${pinHint(unique)},`,
-        "or run without --dry-run to look them up.",
+        one
+          ? "and that group needs its own timezone: the shared one is not applied to it."
+          : "and a multi-group run needs each group's own timezone.",
+        `${pinHint(unique)}, or run without --dry-run to look ${one ? "it" : "them"} up.`,
       ].join(" ")
     );
   }
@@ -849,11 +867,11 @@ export interface CreateMeetupDraftsFromFileOptions {
   groups: CreateMeetupDraftsOptions["groups"];
   /**
    * The config's primary group — the only one whose ids are mirrored into the
-   * `event_url` / `event_id` scalars, and the group a legacy scalar pair without
-   * a readable `event_url` is attributed to. Deliberately independent of
-   * `groups`, so "primary" never depends on which groups a given run happened
-   * to select. Required: without it a numeric `event_id` could be
-   * unattributable, and ignoring it could duplicate a draft.
+   * `event_url` / `event_id` scalars, the group a legacy scalar pair without a
+   * readable `event_url` is attributed to, and the group `timezone` belongs to.
+   * Deliberately independent of `groups`, so "primary" never depends on which
+   * groups a given run happened to select. Required: without it a numeric
+   * `event_id` could be unattributable, and ignoring it could duplicate a draft.
    */
   primaryGroup: string;
   /**
@@ -865,9 +883,9 @@ export interface CreateMeetupDraftsFromFileOptions {
   configuredGroups?: readonly string[];
   venues: VenueMap;
   /**
-   * The config's `meetup.timezone`. As in `createMeetupDrafts`: the fallback when
-   * one group is requested, and with several, the groups naming no zone of their
-   * own are looked up on Meetup.
+   * The config's `meetup.timezone`, the primary group's zone. As in
+   * `createMeetupDrafts`: the fallback when the primary alone is requested;
+   * otherwise the groups naming no zone of their own are looked up on Meetup.
    */
   timezone?: string;
   dryRun?: boolean;
@@ -954,10 +972,12 @@ export async function createMeetupDraftsFromFile(
     return { results: requested.map((g) => orderedResult(byGroup, g.urlname)) };
   }
 
-  // A multi-group run stays one when a retry has a single group left: the shared
-  // timezone may not be that group's, and createMeetupDrafts, seeing one group,
-  // would fall back to it. So the remaining groups' zones are settled here, from
-  // what was requested rather than from what is left to do.
+  // A multi-group run stays one when a retry has a single group left, so it
+  // settles zones the same way the first attempt did: the remaining groups'
+  // zones are settled here, from what was requested rather than from what is
+  // left to do. (createMeetupDrafts, given primaryGroup, would already refuse
+  // the shared zone for a lone non-primary group; this keeps the primary's
+  // zone looked up on a retry too, as it was on the first attempt.)
   let groups = todo;
   if (requested.length > 1 && options.timezone !== undefined) {
     const missing = todo.filter((g) => g.timezone === undefined).map((g) => g.urlname);
@@ -976,6 +996,7 @@ export async function createMeetupDraftsFromFile(
     groups,
     venues: options.venues,
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+    primaryGroup: options.primaryGroup,
     ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
     ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
     log,

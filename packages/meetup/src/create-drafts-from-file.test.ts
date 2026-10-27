@@ -396,6 +396,23 @@ describe("createMeetupDraftsFromFile timezones on a retry", () => {
     ]);
   });
 
+  it("refuses a dry run of a lone non-primary group: its zone is not the shared one", async () => {
+    const file = tempEventFile(FRONTMATTER);
+    await expect(
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: [{ urlname: "cpp-serbia" }],
+        primaryGroup: "chicago-c-cpp-users-group",
+        venues: VENUES,
+        timezone: "America/Chicago",
+        dryRun: true,
+        log: quiet,
+      })
+    ).rejects.toThrow(
+      'Dry run cannot look up the timezone of "cpp-serbia": it makes no Meetup API calls, and that group needs its own timezone'
+    );
+  });
+
   it("keeps the shared timezone when only one group was requested", async () => {
     const file = tempEventFile(FRONTMATTER);
 
@@ -707,5 +724,30 @@ describe("createMeetupDraftsFromFile against Meetup", () => {
       ].join("\n")
     );
     expect(readFileSync(file, "utf8")).toBe(FRONTMATTER);
+  });
+
+  it("looks up a lone non-primary group's timezone rather than use the primary's", async () => {
+    useFake({ groupTimezones: { "cpp-serbia": "Europe/Belgrade" } });
+    const file = tempEventFile(FRONTMATTER);
+
+    await run(file, { groups: [{ urlname: "cpp-serbia" }], timezone: "America/Chicago" });
+
+    // 18:00Z on 2026-05-09 is 20:00 in Belgrade (CEST), not Chicago's 13:00.
+    expect(fake.inputs("createEvent").map((i) => [i.groupUrlname, i.startDateTime])).toEqual([
+      ["cpp-serbia", "2026-05-09T20:00:00"],
+    ]);
+  });
+
+  it("still uses the shared timezone for the primary group alone", async () => {
+    useFake();
+    const file = tempEventFile(FRONTMATTER);
+
+    await run(file, {
+      groups: [{ urlname: "chicago-c-cpp-users-group" }],
+      timezone: "America/Chicago",
+    });
+
+    expect(fake.ops()).toEqual(["createEvent"]);
+    expect(fake.inputs("createEvent")[0]?.startDateTime).toBe("2026-05-09T13:00:00");
   });
 });
