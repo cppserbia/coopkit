@@ -857,12 +857,26 @@ export async function createMeetupDraftsFromFile(
     return { results: requested.map((g) => orderedResult(byGroup, g.urlname)) };
   }
 
+  // A multi-group run stays one when a retry has a single group left: the shared
+  // timezone may not be that group's, and createMeetupDrafts, seeing one group,
+  // would fall back to it. So the remaining groups' zones are settled here, from
+  // what was requested rather than from what is left to do.
+  let groups = todo;
+  if (requested.length > 1 && options.timezone !== undefined) {
+    const missing = todo.filter((g) => g.timezone === undefined).map((g) => g.urlname);
+    const zones = await lookUpGroupTimezones(missing, options, log);
+    groups = todo.map((g) => {
+      const timezone = g.timezone ?? zones.get(g.urlname.toLowerCase());
+      return timezone !== undefined ? { ...g, timezone } : g;
+    });
+  }
+
   let content = parsed.content;
   let data = parsed.data as Record<string, unknown>;
 
   const created = await createMeetupDrafts({
     event,
-    groups: todo,
+    groups,
     venues: options.venues,
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),

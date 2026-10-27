@@ -198,6 +198,91 @@ describe("createMeetupDraftsFromFile (dry-run)", () => {
   });
 });
 
+describe("createMeetupDraftsFromFile timezones on a retry", () => {
+  // The dry-run payloads printed to stdout, one pretty-printed object each.
+  async function capturePayloads(
+    run: () => Promise<unknown>
+  ): Promise<Array<{ groupUrlname: string; startDateTime: string }>> {
+    const original = console.log;
+    const printed: string[] = [];
+    console.log = (message: string) => printed.push(message);
+    try {
+      await run();
+    } finally {
+      console.log = original;
+    }
+    return printed.map((p) => JSON.parse(p));
+  }
+
+  const NETWORK = [{ urlname: "chicago-c-cpp-users-group" }, { urlname: "cpp-serbia" }];
+
+  it("still treats a retry with one group left as multi-group", async () => {
+    // Chicago was created on the first run; only cpp-serbia is left. The shared
+    // timezone is Chicago's, so falling back to it would misplace cpp-serbia's
+    // draft: the group's own zone is needed, which a dry run cannot look up.
+    const file = tempEventFile(
+      withMeetupEvents([{ group: "chicago-c-cpp-users-group", event_id: "313413133" }])
+    );
+
+    await expect(
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: NETWORK,
+        primaryGroup: "chicago-c-cpp-users-group",
+        venues: VENUES,
+        timezone: "America/Chicago",
+        dryRun: true,
+        log: quiet,
+      })
+    ).rejects.toThrow('Dry run cannot look up the timezone of "cpp-serbia"');
+  });
+
+  it("uses the remaining group's own timezone on a retry", async () => {
+    const file = tempEventFile(
+      withMeetupEvents([{ group: "chicago-c-cpp-users-group", event_id: "313413133" }])
+    );
+
+    const payloads = await capturePayloads(() =>
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: [
+          { urlname: "chicago-c-cpp-users-group" },
+          { urlname: "cpp-serbia", timezone: "Europe/Belgrade" },
+        ],
+        primaryGroup: "chicago-c-cpp-users-group",
+        venues: VENUES,
+        timezone: "America/Chicago",
+        dryRun: true,
+        log: quiet,
+      })
+    );
+
+    // 18:00Z on 2026-05-09 is 20:00 in Belgrade (CEST), not Chicago's 13:00.
+    expect(payloads.map((p) => [p.groupUrlname, p.startDateTime])).toEqual([
+      ["cpp-serbia", "2026-05-09T20:00:00"],
+    ]);
+  });
+
+  it("keeps the shared timezone when only one group was requested", async () => {
+    const file = tempEventFile(FRONTMATTER);
+
+    const payloads = await capturePayloads(() =>
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: [{ urlname: "chicago-c-cpp-users-group" }],
+        primaryGroup: "chicago-c-cpp-users-group",
+        venues: VENUES,
+        timezone: "America/Chicago",
+        dryRun: true,
+        log: quiet,
+      })
+    );
+
+    // 18:00Z on 2026-05-09 is 13:00 in Chicago (CDT).
+    expect(payloads.map((p) => p.startDateTime)).toEqual(["2026-05-09T13:00:00"]);
+  });
+});
+
 describe("recordCreatedGroupEvent", () => {
   const parsed = matter(FRONTMATTER);
   const primary = {
