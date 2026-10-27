@@ -439,9 +439,30 @@ describe("per-group timezones", () => {
     expect(targets[0]?.timezone).toBe("America/Chicago");
   });
 
-  it("allows a narrowed single-group run even when the config is multi-group", () => {
+  it("falls back to the shared timezone for the primary group narrowed to alone", () => {
     const targets = resolveGroupTargets(
-      { ...NETWORK, groupTimezones: undefined, timezone: "Europe/Belgrade" },
+      { ...NETWORK, groupTimezones: undefined, timezone: "America/Chicago" },
+      { only: ["CHICAGO-C-CPP-USERS-GROUP"] }
+    );
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", "America/Chicago"],
+    ]);
+  });
+
+  it("never gives the shared timezone to another group, even narrowed to alone", () => {
+    // `timezone` is the primary's zone (Chicago here). Handing it to cpp-serbia
+    // would place that draft at Chicago wall time in Belgrade; left unset, it is
+    // looked up (or refused in a dry run) by createMeetupDrafts.
+    const targets = resolveGroupTargets(
+      { ...NETWORK, groupTimezones: undefined, timezone: "America/Chicago" },
+      { only: ["cpp-serbia"] }
+    );
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([["cpp-serbia", undefined]]);
+  });
+
+  it("still uses a groupTimezones entry for another group narrowed to alone", () => {
+    const targets = resolveGroupTargets(
+      { ...NETWORK, timezone: "America/Chicago" },
       { only: ["cpp-serbia"] }
     );
     expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([

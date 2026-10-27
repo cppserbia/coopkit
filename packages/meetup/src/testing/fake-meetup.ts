@@ -28,6 +28,15 @@ export interface FakeMeetupOptions {
   failEditEvent?: boolean;
   /** Photo ID createGroupEventPhoto hands back for non-main photos. */
   speakerPhotoId?: string;
+  /**
+   * Timezone groupByUrlname reports, by group urlname (case-insensitive). A
+   * group not listed reports none, as Meetup does for a group it cannot read.
+   */
+  groupTimezones?: Record<string, string>;
+  /** Group urlnames (case-insensitive) whose createEvent returns no event and an error. */
+  failCreateEventIn?: string[];
+  /** ID of the first event createEvent hands out; each later one counts up. Default 900001. */
+  firstEventId?: number;
 }
 
 /** One request the fake answered. */
@@ -46,14 +55,34 @@ function urlOf(input: string | URL | Request): string {
 
 export function createFakeMeetup(options: FakeMeetupOptions = {}) {
   const calls: FakeCall[] = [];
-  let nextEventId = 900_001;
+  let nextEventId = options.firstEventId ?? 900_001;
+  const lower = (value: unknown) => String(value).toLowerCase();
   let nextPhotoId = 500_001;
 
   function answer(op: (typeof GQL_FIELDS)[number], input: Record<string, unknown>): unknown {
     switch (op) {
-      case "groupByUrlname":
-        return { id: "4242" };
+      case "groupByUrlname": {
+        // One answer for both queries that use it: the id lookup before a photo
+        // upload, and the timezone lookup (GroupInfo) of a multi-group run.
+        const timezone = Object.entries(options.groupTimezones ?? {}).find(
+          ([group]) => lower(group) === lower(input.urlname)
+        )?.[1];
+        return {
+          id: "4242",
+          urlname: input.urlname,
+          name: input.urlname,
+          timezone: timezone ?? null,
+        };
+      }
       case "createEvent": {
+        if ((options.failCreateEventIn ?? []).some((g) => lower(g) === lower(input.groupUrlname))) {
+          return {
+            event: null,
+            errors: [
+              { message: "Not allowed in this group", code: "FORBIDDEN", field: "groupUrlname" },
+            ],
+          };
+        }
         const id = String(nextEventId++);
         return {
           event: { id, eventUrl: `https://www.meetup.com/${input.groupUrlname}/events/${id}/` },

@@ -2,8 +2,11 @@ import { describe, expect, it } from "bun:test";
 import type { NormalizedEvent } from "@coopkit/core";
 import {
   buildCreateEventPayload,
+  createdGroupEvents,
   detectContentType,
+  groupUrlnameFromEventUrl,
   isEventAlreadyCreated,
+  mergeCreatedGroupEvents,
   stripLeadingHeading,
   wallTimeInZone,
 } from "./payload.js";
@@ -400,5 +403,274 @@ describe("buildCreateEventPayload speakerDetails", () => {
       includeSpeaker: true,
     });
     expect("speakerDetails" in payload).toBe(false);
+  });
+});
+
+describe("groupUrlnameFromEventUrl", () => {
+  it("extracts the urlname from a canonical Meetup event URL", () => {
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/cpp-serbia/events/313413133/")).toBe(
+      "cpp-serbia"
+    );
+  });
+
+  it("accepts http and a missing www", () => {
+    expect(groupUrlnameFromEventUrl("http://meetup.com/cpp-serbia/events/313413133")).toBe(
+      "cpp-serbia"
+    );
+  });
+
+  it("keeps the urlname's case as written", () => {
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/CPPTORONTO/events/313413133/")).toBe(
+      "CPPTORONTO"
+    );
+  });
+
+  it("is undefined for a non-Meetup URL", () => {
+    expect(groupUrlnameFromEventUrl("https://example.com/cpp-serbia/events/1/")).toBeUndefined();
+  });
+
+  it("is undefined for a Meetup URL that is not an event URL", () => {
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/cpp-serbia/")).toBeUndefined();
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/cpp-serbia/events/")).toBeUndefined();
+  });
+
+  it("is undefined for non-strings", () => {
+    expect(groupUrlnameFromEventUrl(undefined)).toBeUndefined();
+    expect(groupUrlnameFromEventUrl(313413133)).toBeUndefined();
+  });
+
+  it("reads the group past a locale segment", () => {
+    // A URL copied from a localized Meetup page is still that group's event.
+    expect(
+      groupUrlnameFromEventUrl("https://www.meetup.com/en-AU/cpp-serbia/events/313413133/")
+    ).toBe("cpp-serbia");
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/de-DE/CPPTORONTO/events/1/")).toBe(
+      "CPPTORONTO"
+    );
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/fr/cpp-serbia/events/1/")).toBe(
+      "cpp-serbia"
+    );
+  });
+
+  it("still reads a two-letter group urlname as the group, not a locale", () => {
+    expect(groupUrlnameFromEventUrl("https://www.meetup.com/js/events/313413133/")).toBe("js");
+  });
+});
+
+describe("createdGroupEvents", () => {
+  it("is empty for a file with no bookkeeping at all", () => {
+    expect(createdGroupEvents({}).size).toBe(0);
+  });
+
+  it("attributes a legacy scalar pair to the group named in event_url", () => {
+    const created = createdGroupEvents(
+      {
+        event_url: "https://www.meetup.com/cpp-serbia/events/313413133/",
+        event_id: 313413133,
+      },
+      { assumedGroup: "chicago-c-cpp-users-group" }
+    );
+
+    // The URL wins: assumedGroup is only a fallback, and trusting it here
+    // would mark the wrong group as done.
+    expect([...created.keys()]).toEqual(["cpp-serbia"]);
+    expect(created.get("cpp-serbia")).toEqual({
+      group: "cpp-serbia",
+      event_id: "313413133",
+      event_url: "https://www.meetup.com/cpp-serbia/events/313413133/",
+    });
+  });
+
+  it("falls back to assumedGroup when there is no usable event_url", () => {
+    const created = createdGroupEvents({ event_id: "313413133" }, { assumedGroup: "cpp-serbia" });
+    expect(created.get("cpp-serbia")?.event_id).toBe("313413133");
+    expect(created.get("cpp-serbia")?.event_url).toBeUndefined();
+  });
+
+  it("throws, rather than ignoring it, for a numeric event_id it cannot attribute", () => {
+    // Ignoring it would read "not created anywhere" and recreate the event.
+    expect(() => createdGroupEvents({ event_id: "313413133" }, { source: "events/x.md" })).toThrow(
+      /event_id=313413133 in events\/x\.md cannot be attributed to a Meetup group/
+    );
+    expect(() =>
+      createdGroupEvents({ event_id: 313413133, event_url: "https://example.com/somewhere" })
+    ).toThrow(/cannot be attributed/);
+  });
+
+  it("attributes a locale-prefixed event_url to its group", () => {
+    const created = createdGroupEvents(
+      { event_url: "https://www.meetup.com/en-AU/cpp-serbia/events/313413133/", event_id: 1 },
+      { assumedGroup: "chicago-c-cpp-users-group" }
+    );
+    expect([...created.keys()]).toEqual(["cpp-serbia"]);
+  });
+
+  it("refuses a scalar naming a group outside knownGroups", () => {
+    // A renamed urlname: the event may well be cpp-serbia's, and guessing
+    // either way could duplicate a draft.
+    const legacy = {
+      event_url: "https://www.meetup.com/Cpp-Serbia-Old/events/111/",
+      event_id: "111",
+    };
+    expect(() =>
+      createdGroupEvents(legacy, {
+        assumedGroup: "cpp-serbia",
+        knownGroups: ["chicago-c-cpp-users-group"],
+        source: "events/x.md",
+      })
+    ).toThrow(
+      /event_id=111 in events\/x\.md has an event_url naming group "Cpp-Serbia-Old", which is not one of "cpp-serbia", "chicago-c-cpp-users-group"/
+    );
+    // Without knownGroups the URL is simply trusted, as before.
+    expect([...createdGroupEvents(legacy, { assumedGroup: "cpp-serbia" }).keys()]).toEqual([
+      "cpp-serbia-old",
+    ]);
+  });
+
+  it("accepts a scalar of an unknown group once meetup_events records its id", () => {
+    // The fix the error above asks for: the row says where the event lives.
+    const created = createdGroupEvents(
+      {
+        event_url: "https://www.meetup.com/Cpp-Serbia-Old/events/111/",
+        event_id: "111",
+        meetup_events: [{ group: "cpp-serbia", event_id: "111" }],
+      },
+      { assumedGroup: "cpp-serbia", knownGroups: ["cpp-serbia"] }
+    );
+    expect([...created.entries()]).toEqual([
+      ["cpp-serbia", { group: "cpp-serbia", event_id: "111" }],
+    ]);
+  });
+
+  it("matches knownGroups case-insensitively", () => {
+    const created = createdGroupEvents(
+      { event_url: "https://www.meetup.com/cpptoronto/events/1/", event_id: "1" },
+      { assumedGroup: "cpp-serbia", knownGroups: ["CPPTORONTO"] }
+    );
+    expect([...created.keys()]).toEqual(["cpptoronto"]);
+  });
+
+  it("ignores the template placeholder event_id", () => {
+    const created = createdGroupEvents(
+      { event_id: "<Meetup.com Event ID>" },
+      { assumedGroup: "cpp-serbia" }
+    );
+    expect(created.size).toBe(0);
+  });
+
+  it("finds a group case-insensitively", () => {
+    const created = createdGroupEvents({
+      meetup_events: [{ group: "CPPTORONTO", event_id: "314900001" }],
+    });
+    expect(created.get("cpptoronto")?.group).toBe("CPPTORONTO");
+  });
+
+  it("lets an explicit meetup_events entry win over the inferred scalar", () => {
+    const created = createdGroupEvents({
+      event_url: "https://www.meetup.com/cpp-serbia/events/313413133/",
+      event_id: 313413133,
+      meetup_events: [{ group: "cpp-serbia", event_id: "999999999" }],
+    });
+    expect(created.size).toBe(1);
+    expect(created.get("cpp-serbia")?.event_id).toBe("999999999");
+  });
+
+  it("keeps both a listed group and the scalar's own group", () => {
+    const created = createdGroupEvents({
+      event_url: "https://www.meetup.com/cpp-serbia/events/313413133/",
+      event_id: 313413133,
+      meetup_events: [{ group: "CPPTORONTO", event_id: "314900001" }],
+    });
+    expect([...created.keys()]).toEqual(["cpptoronto", "cpp-serbia"]);
+  });
+
+  it("throws, naming the source, for a malformed meetup_events entry", () => {
+    expect(() =>
+      createdGroupEvents(
+        { meetup_events: [{ group: "cpp-serbia", event_id: "not-an-id" }] },
+        { source: "events/2026-05-09-test.md" }
+      )
+    ).toThrow(/meetup_events\[0\] in events\/2026-05-09-test\.md/);
+
+    expect(() =>
+      createdGroupEvents(
+        { meetup_events: [{ event_id: "313413133" }] },
+        { source: "events/2026-05-09-test.md" }
+      )
+    ).toThrow(/events\/2026-05-09-test\.md is missing a non-empty `group`/);
+
+    expect(() =>
+      createdGroupEvents({ meetup_events: ["cpp-serbia"] }, { source: "events/x.md" })
+    ).toThrow(/must be an object/);
+
+    expect(() => createdGroupEvents({ meetup_events: "cpp-serbia" })).toThrow(/must be a list/);
+  });
+
+  it("throws for two rows of one group with different event ids, naming both", () => {
+    expect(() =>
+      createdGroupEvents(
+        {
+          meetup_events: [
+            { group: "cpp-serbia", event_id: "111" },
+            { group: "CPPTORONTO", event_id: "222" },
+            { group: "CPP-Serbia", event_id: "333" },
+          ],
+        },
+        { source: "events/x.md" }
+      )
+    ).toThrow(
+      /meetup_events\[0\] and meetup_events\[2\] in events\/x\.md both record group "CPP-Serbia", with different event ids \(111 and 333\)/
+    );
+  });
+
+  it("merges two rows of one group with the same event id", () => {
+    const created = createdGroupEvents({
+      meetup_events: [
+        { group: "cpp-serbia", event_id: "111" },
+        {
+          group: "CPP-Serbia",
+          event_id: 111,
+          event_url: "https://www.meetup.com/cpp-serbia/events/111/",
+        },
+      ],
+    });
+    expect([...created.values()]).toEqual([
+      {
+        group: "cpp-serbia",
+        event_id: "111",
+        event_url: "https://www.meetup.com/cpp-serbia/events/111/",
+      },
+    ]);
+  });
+});
+
+describe("mergeCreatedGroupEvents", () => {
+  const serbia = { group: "cpp-serbia", event_id: "313413133" };
+  const toronto = { group: "CPPTORONTO", event_id: "314900001" };
+
+  it("appends a group that is not recorded yet", () => {
+    expect(mergeCreatedGroupEvents([serbia], toronto)).toEqual([serbia, toronto]);
+  });
+
+  it("replaces a recorded group in place, matching case-insensitively", () => {
+    const merged = mergeCreatedGroupEvents([serbia, toronto], {
+      group: "cpptoronto",
+      event_id: "999999999",
+      event_url: "https://www.meetup.com/cpptoronto/events/999999999/",
+    });
+    expect(merged).toEqual([
+      serbia,
+      {
+        group: "cpptoronto",
+        event_id: "999999999",
+        event_url: "https://www.meetup.com/cpptoronto/events/999999999/",
+      },
+    ]);
+  });
+
+  it("does not mutate the input list", () => {
+    const existing = [serbia];
+    mergeCreatedGroupEvents(existing, toronto);
+    expect(existing).toEqual([serbia]);
   });
 });

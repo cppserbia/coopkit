@@ -2,28 +2,43 @@
 import fs from "node:fs";
 import type { NormalizedEvent } from "@coopkit/core";
 import { defineCommand, runMain } from "citty";
-import { loadMeetupConfig, resolveGroupTargets } from "./config.js";
 import {
-  type CreateMeetupDraftsResult,
+  type GroupTarget,
+  type MeetupConfig,
+  loadMeetupConfig,
+  resolveGroupTargets,
+} from "./config.js";
+import {
   createMeetupDraft,
   createMeetupDraftFromFile,
   createMeetupDrafts,
+  createMeetupDraftsFromFile,
 } from "./create-event.js";
 import { listGroups } from "./list-groups.js";
 import { formatVenueKey, listVenues } from "./list-venues.js";
 import { loadEnvFile } from "./load-env.js";
 
 /**
- * Write the run result as a JSON object to `outputPath` (if given) so callers
- * — notably GitHub Actions — can capture the created event's id/url. Keeps the
- * package free of any Actions-specific coupling: it just emits JSON.
+ * A per-group run's outcome, loose enough for both multi-group entry points:
+ * `create-from-json` never skips, while the file path can report
+ * `{status: "skipped", reason}` for a group already recorded in the file.
  */
+type MultiGroupResult = {
+  results: Array<
+    { groupUrlname: string } & (
+      | { ok: true; result: SingleResult & { reason?: string } }
+      | { ok: false; error: string }
+    )
+  >;
+};
+
 /**
  * Collapse per-group outcomes into one status: "partial" if any group failed,
- * otherwise whatever the groups agree on ("dry-run" or "created"). Reporting a
- * dry run as "created" would be a lie a caller might act on.
+ * otherwise whatever the groups agree on ("dry-run", "created", "skipped"), or
+ * "mixed" when they succeeded differently (some created, some already recorded).
+ * Reporting a dry run as "created" would be a lie a caller might act on.
  */
-function aggregateStatus(result: CreateMeetupDraftsResult): string {
+function aggregateStatus(result: MultiGroupResult): string {
   if (result.results.some((r) => !r.ok)) return "partial";
   const statuses = new Set(result.results.map((r) => (r.ok ? r.result.status : "failed")));
   return statuses.size === 1 ? ([...statuses][0] ?? "created") : "mixed";
@@ -49,9 +64,14 @@ function summarizeSingle(result: SingleResult) {
     : { status: result.status };
 }
 
+/**
+ * Write the run result as a JSON object to `outputPath` (if given) so callers
+ * — notably GitHub Actions — can capture the created event's id/url. Keeps the
+ * package free of any Actions-specific coupling: it just emits JSON.
+ */
 function writeResultFile(
   outputPath: string | undefined,
-  result: SingleResult | CreateMeetupDraftsResult
+  result: SingleResult | MultiGroupResult
 ): void {
   if (!outputPath) return;
 
@@ -63,7 +83,14 @@ function writeResultFile(
           status: aggregateStatus(result),
           groups: result.results.map((r) =>
             r.ok
-              ? { groupUrlname: r.groupUrlname, ok: true, ...summarizeSingle(r.result) }
+              ? {
+                  groupUrlname: r.groupUrlname,
+                  ok: true,
+                  ...summarizeSingle(r.result),
+                  // Only the per-group shape carries a skip reason; the
+                  // single-group payload stays exactly as it was.
+                  ...(r.result.reason !== undefined ? { reason: r.result.reason } : {}),
+                }
               : { groupUrlname: r.groupUrlname, ok: false, error: r.error }
           ),
         }
@@ -72,13 +99,44 @@ function writeResultFile(
   fs.writeFileSync(outputPath, `${JSON.stringify(payload)}\n`);
 }
 
-/** Split a `--host "A,B"` value into trimmed names. */
-function parseHostArg(value: unknown): string[] | undefined {
+/**
+ * Split a comma-separated `--host` / `--groups` value into trimmed names.
+ * Returns `undefined` — not `[]` — for an all-empty value such as `","`: an
+ * empty array is truthy and would silently read as "every group".
+ */
+function parseCsvArg(value: unknown): string[] | undefined {
   if (typeof value !== "string" || value.trim() === "") return undefined;
-  return value
+  const parts = value
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s !== "");
+  return parts.length > 0 ? parts : undefined;
+}
+
+const GROUPS_ARG_DESCRIPTION =
+  'Group urlname(s) to create the event in, comma-separated, or "all" for every group in the config. Defaults to meetup.groupUrlname only.';
+
+/**
+ * Resolve which groups a run targets, shared by both create commands.
+ *
+ * Without `--groups` this selects `meetup.groupUrlname` alone and reports
+ * `multiGroup: false`, which keeps the original single-group code path — same
+ * frontmatter write-back, same `--output` shape.
+ */
+function resolveTargets(
+  config: MeetupConfig,
+  args: { host?: string; groups?: string }
+): { targets: GroupTarget[]; multiGroup: boolean } {
+  const hostNames = parseCsvArg(args.host);
+  const requested = parseCsvArg(args.groups);
+  const multiGroup = requested !== undefined;
+  const all = requested?.length === 1 && requested[0]?.toLowerCase() === "all";
+  const only = multiGroup ? (all ? undefined : requested) : [config.groupUrlname];
+  const targets = resolveGroupTargets(config, {
+    ...(only !== undefined ? { only } : {}),
+    ...(hostNames !== undefined ? { hostNames } : {}),
+  });
+  return { targets, multiGroup };
 }
 
 const createCmd = defineCommand({
@@ -107,6 +165,10 @@ const createCmd = defineCommand({
       description:
         "Host name(s) from meetup.hosts, comma-separated. Defaults to meetup.defaultHosts.",
     },
+    groups: {
+      type: "string",
+      description: GROUPS_ARG_DESCRIPTION,
+    },
     output: {
       type: "string",
       description:
@@ -116,25 +178,48 @@ const createCmd = defineCommand({
   async run({ args }) {
     loadEnvFile();
     const config = loadMeetupConfig(args.config);
-    const hostNames = parseHostArg(args.host);
-    const [target] = resolveGroupTargets(config, {
-      only: [config.groupUrlname],
-      ...(hostNames !== undefined ? { hostNames } : {}),
-    });
-    if (!target) throw new Error("No group resolved from the config.");
-    const result = await createMeetupDraftFromFile({
+    const { targets, multiGroup } = resolveTargets(config, args);
+
+    // Single-group runs keep the original path: scalar event_url/event_id
+    // write-back and the flat --output shape.
+    if (!multiGroup) {
+      const [target] = targets;
+      if (!target) throw new Error("No group resolved from the config.");
+      const result = await createMeetupDraftFromFile({
+        eventFile: args.eventFile,
+        groupUrlname: target.urlname,
+        venues: config.venues,
+        ...((target.timezone ?? config.timezone) !== undefined
+          ? { timezone: (target.timezone ?? config.timezone) as string }
+          : {}),
+        ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
+        includeSpeaker: target.includeSpeaker,
+        includeSpeakerPhoto: target.includeSpeakerPhoto,
+        dryRun: Boolean(args["dry-run"]),
+      });
+      writeResultFile(args.output, result);
+      return;
+    }
+
+    // `targets` carry each group's groupTimezones entry. Passing config.timezone
+    // marks the dates as true instants: it is the fallback for the primary group
+    // selected alone, and every other unmapped group is looked up.
+    const result = await createMeetupDraftsFromFile({
       eventFile: args.eventFile,
-      groupUrlname: target.urlname,
+      groups: targets,
+      // Always the config's primary group, never whichever group --groups
+      // happens to name first: the scalars must keep pointing at one group, and
+      // config.timezone is that group's zone.
+      primaryGroup: config.groupUrlname,
+      // So a legacy event_url naming a configured group this run leaves out is
+      // attributed to it rather than refused as unknown.
+      configuredGroups: [config.groupUrlname, ...(config.groups ?? [])],
       venues: config.venues,
-      ...((target.timezone ?? config.timezone) !== undefined
-        ? { timezone: (target.timezone ?? config.timezone) as string }
-        : {}),
-      ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
-      includeSpeaker: target.includeSpeaker,
-      includeSpeakerPhoto: target.includeSpeakerPhoto,
+      ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
+    if (result.results.some((r) => !r.ok)) process.exitCode = 1;
   },
 });
 
@@ -188,8 +273,7 @@ const createFromJsonCmd = defineCommand({
     },
     groups: {
       type: "string",
-      description:
-        'Group urlname(s) to create the event in, comma-separated, or "all" for every group in the config. Defaults to meetup.groupUrlname only.',
+      description: GROUPS_ARG_DESCRIPTION,
     },
     output: {
       type: "string",
@@ -202,21 +286,7 @@ const createFromJsonCmd = defineCommand({
     const config = loadMeetupConfig(args.config);
     const raw = args.file ? fs.readFileSync(args.file, "utf8") : readStdin();
     const event = parseNormalizedEvent(raw);
-    const hostNames = parseHostArg(args.host);
-    const requested = parseHostArg(args.groups);
-    const multiGroup = requested !== undefined;
-    // Without --groups only groupUrlname is created, so resolve only that one,
-    // as `create` does: it is a single-group selection, so meetup.timezone
-    // applies to it directly rather than being treated as a multi-group run.
-    const only = !multiGroup
-      ? [config.groupUrlname]
-      : !(requested.length === 1 && requested[0]?.toLowerCase() === "all")
-        ? requested
-        : undefined;
-    const targets = resolveGroupTargets(config, {
-      ...(only !== undefined ? { only } : {}),
-      ...(hostNames !== undefined ? { hostNames } : {}),
-    });
+    const { targets, multiGroup } = resolveTargets(config, args);
 
     // Single-group runs keep returning the bare result, so existing callers
     // parsing --output see no change; --groups opts into the per-group report.
@@ -240,13 +310,15 @@ const createFromJsonCmd = defineCommand({
     }
 
     // `targets` carry each group's groupTimezones entry. Passing config.timezone
-    // marks the dates as true instants: it is the fallback for a single selected
-    // group, and with several, createMeetupDrafts looks up the unmapped ones.
+    // marks the dates as true instants: it is the fallback for the primary group
+    // selected alone, and createMeetupDrafts looks up every other unmapped group
+    // (primaryGroup is what tells it a lone --groups target is not the primary).
     const result = await createMeetupDrafts({
       event,
       groups: targets,
       venues: config.venues,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      primaryGroup: config.groupUrlname,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);

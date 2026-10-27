@@ -2,7 +2,7 @@
 // verifies arg parsing, config loading, and the --output result file used by
 // the GitHub Action to surface event-id / event-url.
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,22 @@ function scratch(): string {
 const CONFIG = JSON.stringify({
   meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 } },
 });
+
+const NETWORK_CONFIG = JSON.stringify({
+  meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 }, groups: ["CPPTORONTO"] },
+});
+
+const EVENT_MARKDOWN = [
+  "---",
+  "title: Test Event",
+  "date: 2026-05-09T16:00:00.000Z",
+  "duration: PT1H",
+  "venues:",
+  "  - online",
+  "---",
+  "",
+  "Body.",
+].join("\n");
 
 const EVENT = JSON.stringify({
   id: "2026-05-09-test",
@@ -45,17 +61,27 @@ function payloads(stdout: string): Array<{ groupUrlname: string; startDateTime: 
 
 const FAKE_MEETUP = join(import.meta.dir, "testing", "fake-meetup-preload.ts");
 
+/** A request the preloaded fake answered, as it logs them (see fake-meetup.ts). */
+type FakeCall = { op: string; input?: Record<string, unknown> };
+
 /**
  * Run the bin for real, not as a dry run, against the fake Meetup preloaded
  * into the child process (testing/fake-meetup.ts): no network, no secrets.
+ * `fake` is its FakeMeetupOptions; `calls` lists the requests it answered.
  */
 async function runAgainstFakeMeetup(
   args: string[],
-  cwd: string
-): Promise<{ code: number; stderr: string }> {
+  cwd: string,
+  fake: object = {}
+): Promise<{ code: number; stderr: string; calls: FakeCall[] }> {
+  const callsPath = join(cwd, "fake-meetup-calls.json");
   const proc = Bun.spawn(["bun", "--preload", FAKE_MEETUP, CLI, ...args], {
     cwd,
-    env: { ...process.env, COOPKIT_FAKE_MEETUP: "{}" },
+    env: {
+      ...process.env,
+      COOPKIT_FAKE_MEETUP: JSON.stringify(fake),
+      COOPKIT_FAKE_MEETUP_CALLS: callsPath,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -64,7 +90,10 @@ async function runAgainstFakeMeetup(
     new Response(proc.stderr).text(),
   ]);
   const code = await proc.exited;
-  return { code, stderr };
+  const calls = existsSync(callsPath)
+    ? (JSON.parse(readFileSync(callsPath, "utf8")) as FakeCall[]).filter((c) => c.op !== "token")
+    : [];
+  return { code, stderr, calls };
 }
 
 describe("create-from-json --output (dry-run)", () => {
@@ -552,6 +581,323 @@ describe("speakerPhoto is opt-in", () => {
 
       expect(code).not.toBe(0);
       expect(stderr).toContain("meetup.speakerPhoto covers");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("create --groups (dry-run)", () => {
+  it("reports every group in the config and leaves the file untouched", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        "all",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result.status).toBe("dry-run");
+      expect(result.groups.map((g: { groupUrlname: string }) => g.groupUrlname)).toEqual([
+        "cpp-serbia",
+        "CPPTORONTO",
+      ]);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the single-group --output shape without --groups", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result).toEqual({ status: "dry-run" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 1 and reports partial when a group fails", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      // No "online" venue: every group fails to build its payload.
+      writeFileSync(
+        config,
+        JSON.stringify({
+          meetup: { groupUrlname: "cpp-serbia", venues: { other: 1 }, groups: ["CPPTORONTO"] },
+        })
+      );
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        "all",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(1);
+      const result = JSON.parse(readFileSync(out, "utf8"));
+      expect(result.status).toBe("partial");
+      expect(result.groups.every((g: { ok: boolean }) => !g.ok)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats --groups "," as no --groups at all, not as every group', async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code } = await run([
+        "create",
+        "--config",
+        config,
+        "--groups",
+        ",",
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      // An empty parsed list used to be truthy, which silently meant "all".
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "dry-run" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("create without --groups keeps v0.3.0's skip rule", () => {
+  it("skips a legacy event_id whose event_url names another group, writing nothing", async () => {
+    // The blocker: the URL names a renamed (or another config's) group. v0.3.0
+    // skipped, the reusable workflow saw no event_url change and committed
+    // nothing; creating here would commit a duplicate draft over the scalars.
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      const contents = EVENT_MARKDOWN.replace(
+        "duration: PT1H",
+        [
+          "duration: PT1H",
+          "event_url: 'https://www.meetup.com/Cpp-Serbia-Old/events/111/'",
+          "event_id: '111'",
+        ].join("\n")
+      );
+      writeFileSync(config, CONFIG);
+      writeFileSync(eventFile, contents);
+
+      const { code, stderr, calls } = await runAgainstFakeMeetup(
+        ["create", "--config", config, "--output", out, eventFile],
+        dir
+      );
+
+      expect(code).toBe(0);
+      expect(stderr).toBe(`[skip] ${eventFile} already has event_id=111; nothing to do.\n`);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "skipped" });
+      expect(calls).toEqual([]);
+      expect(readFileSync(eventFile, "utf8")).toBe(contents);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("timezone of a lone --groups target", () => {
+  it("create --groups <another group> --dry-run refuses rather than use the primary's zone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code, stdout, stderr } = await run([
+        "create",
+        "--groups",
+        "cpp-serbia",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('Dry run cannot look up the timezone of "cpp-serbia"');
+      expect(stderr).toContain("or run without --dry-run to look it up.");
+      expect(stdout).toBe("");
+      expect(existsSync(out)).toBe(false);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create-from-json --groups <another group> --dry-run refuses too", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stdout, stderr } = await run([
+        "create-from-json",
+        "--groups",
+        "cpp-serbia",
+        "--config",
+        config,
+        "--dry-run",
+        event,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('Dry run cannot look up the timezone of "cpp-serbia"');
+      expect(stdout).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create-from-json --groups <another group> looks its zone up on a real run", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stderr, calls } = await runAgainstFakeMeetup(
+        ["create-from-json", "--groups", "cpp-serbia", "--config", config, event],
+        dir,
+        { groupTimezones: { "cpp-serbia": "Europe/Belgrade" } }
+      );
+
+      expect(code).toBe(0);
+      expect(stderr).toContain(
+        "[info] Using Meetup's timezone for cpp-serbia: Europe/Belgrade (pin it with meetup.groupTimezones)"
+      );
+      // 16:00Z on 2026-05-09 is 18:00 in Belgrade (CEST), not Chicago's 11:00.
+      const created = calls.filter((c) => c.op === "createEvent").map((c) => c.input);
+      expect(created.map((i) => [i?.groupUrlname, i?.startDateTime])).toEqual([
+        ["cpp-serbia", "2026-05-09T18:00:00"],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("create without --groups still converts with meetup.timezone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+
+      const { code, stdout } = await run([
+        "create",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        eventFile,
+      ]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "dry-run" });
+      const payload = JSON.parse(stdout);
+      expect([payload.groupUrlname, payload.startDateTime]).toEqual([
+        "chicago-c-cpp-users-group",
+        "2026-05-09T11:00:00",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Root can write a 0444 file, so the failure this needs cannot be staged there.
+const isRoot = process.getuid?.() === 0;
+
+describe("create --groups when the event file cannot be written", () => {
+  it.skipIf(isRoot)("exits non-zero after the first draft, naming it", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, MULTI_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+      chmodSync(eventFile, 0o444);
+
+      const { code, stderr, calls } = await runAgainstFakeMeetup(
+        ["create", "--groups", "all", "--config", config, "--output", out, eventFile],
+        dir
+      );
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(
+        "Created Meetup draft 900001 in group cpp-serbia (https://www.meetup.com/cpp-serbia/events/900001/),"
+      );
+      expect(stderr).toContain("Stopped before creating the event in any further group.");
+      // One draft, not two: chicago was never attempted.
+      expect(calls.filter((c) => c.op === "createEvent").length).toBe(1);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
