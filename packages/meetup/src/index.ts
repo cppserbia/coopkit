@@ -31,6 +31,7 @@ export {
   createMeetupDraftFromFile,
   createMeetupDrafts,
   createMeetupDraftsFromFile,
+  DraftNotRecordedError,
   recordCreatedGroupEvent,
 } from "./create-event.js";
 export type {

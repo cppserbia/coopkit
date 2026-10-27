@@ -28,6 +28,10 @@ export interface FakeMeetupOptions {
   failEditEvent?: boolean;
   /** Photo ID createGroupEventPhoto hands back for non-main photos. */
   speakerPhotoId?: string;
+  /** Group urlnames (case-insensitive) whose createEvent returns no event and an error. */
+  failCreateEventIn?: string[];
+  /** ID of the first event createEvent hands out; each later one counts up. Default 900001. */
+  firstEventId?: number;
 }
 
 /** One request the fake answered. */
@@ -46,7 +50,8 @@ function urlOf(input: string | URL | Request): string {
 
 export function createFakeMeetup(options: FakeMeetupOptions = {}) {
   const calls: FakeCall[] = [];
-  let nextEventId = 900_001;
+  let nextEventId = options.firstEventId ?? 900_001;
+  const lower = (value: unknown) => String(value).toLowerCase();
   let nextPhotoId = 500_001;
 
   function answer(op: (typeof GQL_FIELDS)[number], input: Record<string, unknown>): unknown {
@@ -54,6 +59,14 @@ export function createFakeMeetup(options: FakeMeetupOptions = {}) {
       case "groupByUrlname":
         return { id: "4242" };
       case "createEvent": {
+        if ((options.failCreateEventIn ?? []).some((g) => lower(g) === lower(input.groupUrlname))) {
+          return {
+            event: null,
+            errors: [
+              { message: "Not allowed in this group", code: "FORBIDDEN", field: "groupUrlname" },
+            ],
+          };
+        }
         const id = String(nextEventId++);
         return {
           event: { id, eventUrl: `https://www.meetup.com/${input.groupUrlname}/events/${id}/` },

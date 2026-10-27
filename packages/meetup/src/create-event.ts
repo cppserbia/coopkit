@@ -605,6 +605,36 @@ export async function createMeetupDraftFromFile(
   });
 }
 
+/**
+ * A draft was created on Meetup but could not be recorded wherever the caller
+ * keeps its bookkeeping — for `createMeetupDraftsFromFile`, the event file.
+ *
+ * Thrown from `onCreated`, it stops a `createMeetupDrafts` run on the spot.
+ * Every other per-group error is collected and the remaining groups still run;
+ * this one is rethrown instead, because carrying on would create each further
+ * group's draft unrecorded as well, and with no record the next run would
+ * create them all again. Meetup has no rollback, so the message names the
+ * draft that exists, for the user to record by hand.
+ */
+export class DraftNotRecordedError extends Error {
+  override readonly name = "DraftNotRecordedError";
+  /** The group the unrecorded draft was created in. */
+  readonly groupUrlname: string;
+  readonly eventId: string;
+  readonly eventUrl: string;
+
+  constructor(
+    message: string,
+    draft: { groupUrlname: string; eventId: string; eventUrl: string },
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.groupUrlname = draft.groupUrlname;
+    this.eventId = draft.eventId;
+    this.eventUrl = draft.eventUrl;
+  }
+}
+
 export interface CreateMeetupDraftsOptions {
   event: NormalizedEvent;
   /**
@@ -657,7 +687,9 @@ export type CreateMeetupDraftsResult = {
  * Groups are processed **sequentially** — a partial failure must not race — and
  * one group failing does not stop the rest. Every outcome is reported, so the
  * caller can retry only the groups that failed. There is no cross-group
- * rollback: on partial failure the drafts that succeeded stay.
+ * rollback: on partial failure the drafts that succeeded stay. The one
+ * exception is a `DraftNotRecordedError` from `onCreated`, which is rethrown at
+ * once, with no further group attempted.
  *
  * Timezones are settled first, though: when `timezone` is set and several
  * groups are given, every group without its own `timezone` is looked up from
@@ -696,6 +728,8 @@ export async function createMeetupDrafts(
       });
       results.push({ groupUrlname: group.urlname, ok: true, result });
     } catch (err) {
+      // A draft that exists but is not recorded: stop rather than make more.
+      if (err instanceof DraftNotRecordedError) throw err;
       const error = err instanceof Error ? err.message : String(err);
       log(`[error] ${group.urlname}: ${error}`);
       results.push({ groupUrlname: group.urlname, ok: false, error });
@@ -866,10 +900,12 @@ export type CreateMeetupDraftsFromFileResult = {
  * groups, and guessing wrong would duplicate that group's draft.
  *
  * The file is written back **inside** `onCreated`, once per group, so a failure
- * halfway through still leaves the successful groups recorded on disk. When
- * every requested group is already recorded, this returns before constructing a
- * client or touching the file, so "the file did not change" keeps meaning "no
- * work was done".
+ * halfway through still leaves the successful groups recorded on disk. If that
+ * write fails, the run stops at once with a `DraftNotRecordedError` naming the
+ * draft that was just created, and no further group is attempted: each one
+ * would be created unrecorded too. When every requested group is already
+ * recorded, this returns before constructing a client or touching the file, so
+ * "the file did not change" keeps meaning "no work was done".
  */
 export async function createMeetupDraftsFromFile(
   options: CreateMeetupDraftsFromFileOptions
@@ -949,21 +985,29 @@ export async function createMeetupDraftsFromFile(
         event_id: result.eventId,
         ...(result.eventUrl !== "" ? { event_url: result.eventUrl } : {}),
       };
-      const updated = recordCreatedGroupEvent({
-        content,
-        data,
-        entry,
-        existing: [...already.values()],
-        primaryGroup: options.primaryGroup,
-      });
-      fs.writeFileSync(options.eventFile, updated);
+      try {
+        const updated = recordCreatedGroupEvent({
+          content,
+          data,
+          entry,
+          existing: [...already.values()],
+          primaryGroup: options.primaryGroup,
+        });
+        fs.writeFileSync(options.eventFile, updated);
 
-      // Re-read our own output so the next group merges onto exactly what is
-      // on disk, rather than a hand-maintained copy that could drift.
-      const reloaded = parseFrontmatter(updated);
-      content = reloaded.content;
-      data = reloaded.data as Record<string, unknown>;
-      already = createdGroupEvents(data as CreatedEventBookkeeping, bookkeeping);
+        // Re-read our own output so the next group merges onto exactly what is
+        // on disk, rather than a hand-maintained copy that could drift.
+        const reloaded = parseFrontmatter(updated);
+        content = reloaded.content;
+        data = reloaded.data as Record<string, unknown>;
+        already = createdGroupEvents(data as CreatedEventBookkeeping, bookkeeping);
+      } catch (err) {
+        throw new DraftNotRecordedError(
+          unrecordedDraftMessage(options.eventFile, entry, err),
+          { groupUrlname, eventId: result.eventId, eventUrl: result.eventUrl },
+          { cause: err }
+        );
+      }
       log(`[updated] ${options.eventFile} with meetup_events entry for ${groupUrlname}`);
     },
   });
@@ -973,6 +1017,30 @@ export async function createMeetupDraftsFromFile(
   }
 
   return { results: requested.map((g) => orderedResult(byGroup, g.urlname)) };
+}
+
+/**
+ * What to tell the user when a draft exists but its write-back failed: which
+ * draft, why, and the exact row to add so the next run does not create it again.
+ */
+function unrecordedDraftMessage(eventFile: string, entry: PublishedEventRef, err: unknown): string {
+  const reason = (err instanceof Error ? err.message : String(err)).trim().replace(/\.$/, "");
+  const at = entry.event_url !== undefined ? ` (${entry.event_url})` : "";
+  const row = [
+    `  - group: ${entry.group}`,
+    `    event_id: '${entry.event_id}'`,
+    ...(entry.event_url !== undefined ? [`    event_url: '${entry.event_url}'`] : []),
+  ];
+  return [
+    [
+      `Created Meetup draft ${entry.event_id} in group ${entry.group}${at},`,
+      `but could not record it in ${eventFile}: ${reason}.`,
+      "Stopped before creating the event in any further group.",
+      "Record this draft by hand before re-running, or the next run creates it again.",
+      "Add to meetup_events:",
+    ].join(" "),
+    ...row,
+  ].join("\n");
 }
 
 /** Look up a group's outcome, so results come back in the requested order. */

@@ -2,7 +2,7 @@
 // verifies arg parsing, config loading, and the --output result file used by
 // the GitHub Action to surface event-id / event-url.
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -746,6 +746,39 @@ describe("create without --groups keeps v0.3.0's skip rule", () => {
       expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "skipped" });
       expect(calls).toEqual([]);
       expect(readFileSync(eventFile, "utf8")).toBe(contents);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Root can write a 0444 file, so the failure this needs cannot be staged there.
+const isRoot = process.getuid?.() === 0;
+
+describe("create --groups when the event file cannot be written", () => {
+  it.skipIf(isRoot)("exits non-zero after the first draft, naming it", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const eventFile = join(dir, "2026-05-09-test.md");
+      const out = join(dir, "result.json");
+      writeFileSync(config, MULTI_CONFIG);
+      writeFileSync(eventFile, EVENT_MARKDOWN);
+      chmodSync(eventFile, 0o444);
+
+      const { code, stderr, calls } = await runAgainstFakeMeetup(
+        ["create", "--groups", "all", "--config", config, "--output", out, eventFile],
+        dir
+      );
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(
+        "Created Meetup draft 900001 in group cpp-serbia (https://www.meetup.com/cpp-serbia/events/900001/),"
+      );
+      expect(stderr).toContain("Stopped before creating the event in any further group.");
+      // One draft, not two: chicago was never attempted.
+      expect(calls.filter((c) => c.op === "createEvent").length).toBe(1);
+      expect(readFileSync(eventFile, "utf8")).toBe(EVENT_MARKDOWN);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NormalizedEvent } from "@coopkit/core";
 import type { MeetupCredentials } from "./client.js";
-import { createMeetupDrafts } from "./create-event.js";
+import { DraftNotRecordedError, createMeetupDrafts } from "./create-event.js";
 import type { CreateEventPayload } from "./payload.js";
 
 const EVENT: NormalizedEvent = {
@@ -20,6 +20,48 @@ const EVENT: NormalizedEvent = {
 const VENUES = { online: "online" } as const;
 
 let calls = 0;
+
+const realFetch = globalThis.fetch;
+let keyDir = "";
+let credentials: MeetupCredentials;
+
+beforeAll(() => {
+  keyDir = mkdtempSync(join(tmpdir(), "coopkit-key-"));
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const privateKeyPath = join(keyDir, "key.pem");
+  writeFileSync(privateKeyPath, privateKey);
+  credentials = { clientKey: "test", memberId: "1", privateKeyPath, signingKeyId: "kid" };
+});
+
+afterAll(() => {
+  rmSync(keyDir, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+/** Accept every createEvent (ids 1, 2, ...) and return the groups created in, in order. */
+function stubCreates(): string[] {
+  const created: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).includes("oauth2")) {
+      return Response.json({ access_token: "token", expires_in: 3600 });
+    }
+    const { query, variables } = JSON.parse(String(init?.body));
+    if (!query.includes("createEvent")) throw new Error(`Unexpected request in test: ${query}`);
+    created.push(variables.input.groupUrlname);
+    const id = String(created.length);
+    return Response.json({
+      data: { createEvent: { event: { id, eventUrl: `https://m.test/${id}` }, errors: null } },
+    });
+  }) as typeof fetch;
+  return created;
+}
 
 // dryRun keeps this offline: createMeetupDraft returns the built payload
 // without touching the network. No shared `timezone`: with several groups that
@@ -117,6 +159,48 @@ describe("createMeetupDrafts", () => {
     expect(failure?.ok === false && failure.error).toMatch(/Unknown venue/);
   });
 
+  it("keeps going past an onCreated failure that is not DraftNotRecordedError", async () => {
+    // The v0.3.0 contract for onCreated: its error is that group's failure.
+    const calls = stubCreates();
+    const { results } = await createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "first-group" }, { urlname: "second-group" }],
+      venues: { ...VENUES },
+      credentials,
+      log: () => {},
+      onCreated: ({ groupUrlname }) => {
+        if (groupUrlname === "first-group") throw new Error("bookkeeping hiccup");
+      },
+    });
+
+    expect(results.map((r) => r.ok)).toEqual([false, true]);
+    expect(results[0]?.ok === false && results[0].error).toBe("bookkeeping hiccup");
+    expect(calls).toEqual(["first-group", "second-group"]);
+  });
+
+  it("stops the run at a DraftNotRecordedError from onCreated", async () => {
+    const calls = stubCreates();
+    const run = createMeetupDrafts({
+      event: EVENT,
+      groups: [{ urlname: "first-group" }, { urlname: "second-group" }],
+      venues: { ...VENUES },
+      credentials,
+      log: () => {},
+      onCreated: ({ groupUrlname, result }) => {
+        throw new DraftNotRecordedError(`could not record ${result.eventId}`, {
+          groupUrlname,
+          eventId: result.eventId,
+          eventUrl: result.eventUrl,
+        });
+      },
+    });
+
+    await expect(run).rejects.toBeInstanceOf(DraftNotRecordedError);
+    await expect(run).rejects.toThrow("could not record 1");
+    // Never reached: a second draft would be just as unrecorded.
+    expect(calls).toEqual(["first-group"]);
+  });
+
   it("throws when given no groups at all", async () => {
     await expect(
       createMeetupDrafts({
@@ -189,30 +273,6 @@ describe("timezone lookup for a multi-group run with a shared timezone", () => {
     | { kind: "token" }
     | { kind: "group"; urlname: string }
     | { kind: "create"; input: CreateEventPayload };
-
-  const realFetch = globalThis.fetch;
-  let keyDir = "";
-  let credentials: MeetupCredentials;
-
-  beforeAll(() => {
-    keyDir = mkdtempSync(join(tmpdir(), "coopkit-key-"));
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    });
-    const privateKeyPath = join(keyDir, "key.pem");
-    writeFileSync(privateKeyPath, privateKey);
-    credentials = { clientKey: "test", memberId: "1", privateKeyPath, signingKeyId: "kid" };
-  });
-
-  afterAll(() => {
-    rmSync(keyDir, { recursive: true, force: true });
-  });
-
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
 
   /**
    * Answer group lookups from `timezones` (by urlname) and accept every

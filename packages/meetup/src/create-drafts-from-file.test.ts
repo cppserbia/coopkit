@@ -1,12 +1,24 @@
 // Multi-group file-per-event tests. Offline: dryRun stops createMeetupDraft
 // after building the payload, and the per-group skip happens before any client
 // is constructed — one case deliberately runs with dryRun:false to prove it.
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// Past dry-run, the cases run against the fake Meetup (testing/fake-meetup.ts),
+// which stands in for fetch.
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import matter from "gray-matter";
-import { createMeetupDraftsFromFile, recordCreatedGroupEvent } from "./create-event.js";
+import type { MeetupCredentials } from "./client.js";
+import {
+  type CreateMeetupDraftsFromFileOptions,
+  createMeetupDraftsFromFile,
+  recordCreatedGroupEvent,
+} from "./create-event.js";
+import {
+  type FakeMeetupOptions,
+  createFakeMeetup,
+  fakeCredentials,
+} from "./testing/fake-meetup.js";
 import type { VenueMap } from "./venues.js";
 
 const VENUES: VenueMap = { online: "online" };
@@ -556,5 +568,144 @@ describe("recordCreatedGroupEvent", () => {
       { group: "cpp-serbia", event_id: "313413133", note: "first", by: "alex" },
       secondary,
     ]);
+  });
+});
+
+describe("createMeetupDraftsFromFile against Meetup", () => {
+  const realFetch = globalThis.fetch;
+  let credentials: MeetupCredentials;
+  let fake: ReturnType<typeof createFakeMeetup>;
+
+  beforeAll(() => {
+    credentials = fakeCredentials();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function useFake(options: FakeMeetupOptions = {}): void {
+    fake = createFakeMeetup(options);
+    globalThis.fetch = fake.fetch;
+  }
+
+  function run(file: string, overrides: Partial<CreateMeetupDraftsFromFileOptions> = {}) {
+    return createMeetupDraftsFromFile({
+      eventFile: file,
+      groups: THREE_GROUPS,
+      primaryGroup: "chicago-c-cpp-users-group",
+      venues: VENUES,
+      credentials,
+      log: quiet,
+      ...overrides,
+    });
+  }
+
+  const row = (group: string, id: number) => ({
+    group,
+    event_id: String(id),
+    event_url: `https://www.meetup.com/${group}/events/${id}/`,
+  });
+
+  it("records every group, each write merged onto the one before it", async () => {
+    useFake();
+    const file = tempEventFile(FRONTMATTER);
+
+    const { results } = await run(file);
+
+    expect(statuses(results)).toEqual(["created", "created", "created"]);
+    const written = matter(readFileSync(file, "utf8"));
+    // Lose the re-read between groups and each write would start from the
+    // file as first read, keeping only the last group's row.
+    expect(written.data.meetup_events).toEqual([
+      row("chicago-c-cpp-users-group", 900001),
+      row("cpp-serbia", 900002),
+      row("CPPTORONTO", 900003),
+    ]);
+    expect(written.data.event_id).toBe("900001");
+    expect(written.data.event_url).toBe(
+      "https://www.meetup.com/chicago-c-cpp-users-group/events/900001/"
+    );
+  });
+
+  it("keeps keys a person added to a row it did not create", async () => {
+    useFake();
+    const file = tempEventFile(
+      withMeetupEvents([{ group: "cpp-serbia", event_id: "313413133", note: "created by hand" }])
+    );
+
+    await run(file);
+
+    expect(matter(readFileSync(file, "utf8")).data.meetup_events).toEqual([
+      { group: "cpp-serbia", event_id: "313413133", note: "created by hand" },
+      row("chicago-c-cpp-users-group", 900001),
+      row("CPPTORONTO", 900002),
+    ]);
+  });
+
+  it("retries only the group that failed, keeping what the first run recorded", async () => {
+    useFake({ failCreateEventIn: ["cpp-serbia"] });
+    const file = tempEventFile(FRONTMATTER);
+
+    const first = await run(file);
+
+    expect(statuses(first.results)).toEqual(["created", "failed", "created"]);
+    expect(matter(readFileSync(file, "utf8")).data.meetup_events).toEqual([
+      row("chicago-c-cpp-users-group", 900001),
+      row("CPPTORONTO", 900002),
+    ]);
+
+    useFake({ firstEventId: 900101 });
+    const second = await run(file);
+
+    expect(statuses(second.results)).toEqual(["skipped", "created", "skipped"]);
+    expect(fake.inputs("createEvent").map((i) => i.groupUrlname)).toEqual(["cpp-serbia"]);
+    const written = matter(readFileSync(file, "utf8"));
+    expect(written.data.meetup_events).toEqual([
+      row("chicago-c-cpp-users-group", 900001),
+      row("CPPTORONTO", 900002),
+      row("cpp-serbia", 900101),
+    ]);
+    expect(written.data.event_id).toBe("900001");
+  });
+
+  it("stops at a failed write-back, naming the draft, and creates nothing more", async () => {
+    useFake();
+    const file = tempEventFile(FRONTMATTER);
+    const write = spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error(`EACCES: permission denied, open '${file}'`);
+    });
+
+    let thrown: unknown;
+    try {
+      await run(file);
+    } catch (err) {
+      thrown = err;
+    } finally {
+      write.mockRestore();
+    }
+
+    // The first draft exists but is not on disk: carrying on would create the
+    // other two unrecorded as well, and a rerun would duplicate all three.
+    expect(fake.inputs("createEvent").map((i) => i.groupUrlname)).toEqual([
+      "chicago-c-cpp-users-group",
+    ]);
+    expect(thrown).toBeInstanceOf(Error);
+    const error = thrown as Error & { eventId?: string; groupUrlname?: string };
+    expect(error.name).toBe("DraftNotRecordedError");
+    expect(error.eventId).toBe("900001");
+    expect(error.groupUrlname).toBe("chicago-c-cpp-users-group");
+    expect(error.message).toContain(
+      "Created Meetup draft 900001 in group chicago-c-cpp-users-group (https://www.meetup.com/chicago-c-cpp-users-group/events/900001/),"
+    );
+    expect(error.message).toContain(`but could not record it in ${file}: EACCES`);
+    expect(error.message).toContain(
+      [
+        "  - group: chicago-c-cpp-users-group",
+        "    event_id: '900001'",
+        "    event_url: 'https://www.meetup.com/chicago-c-cpp-users-group/events/900001/'",
+      ].join("\n")
+    );
+    expect(readFileSync(file, "utf8")).toBe(FRONTMATTER);
   });
 });
