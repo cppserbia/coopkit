@@ -17,6 +17,7 @@ import {
   createdGroupEvents,
   detectContentType,
   isEventAlreadyCreated,
+  meetupEventsRows,
   mergeCreatedGroupEvents,
   stripLeadingHeading,
 } from "./payload.js";
@@ -462,7 +463,8 @@ export interface RecordCreatedGroupEventInput {
  * the file and so never create the primary event at all, and would point an
  * adopter site's "Register on Meetup" link at the wrong group. `meetup_events`
  * always gets the row, primary or not, and always includes the primary — it is
- * the complete record.
+ * the complete record. Rows already in `data.meetup_events` keep any keys
+ * beyond `group` / `event_id` / `event_url` that someone added by hand.
  */
 export function recordCreatedGroupEvent(input: RecordCreatedGroupEventInput): string {
   const { content, data, entry, existing, primaryGroup } = input;
@@ -474,11 +476,11 @@ export function recordCreatedGroupEvent(input: RecordCreatedGroupEventInput): st
     if (entry.event_url !== undefined) next.event_url = entry.event_url;
     next.event_id = entry.event_id;
   }
-  next.meetup_events = mergeCreatedGroupEvents(existing, entry).map((e) => ({
-    group: e.group,
-    event_id: e.event_id,
-    ...(e.event_url !== undefined ? { event_url: e.event_url } : {}),
-  }));
+  next.meetup_events = meetupEventsRows(
+    mergeCreatedGroupEvents(existing, entry),
+    data.meetup_events,
+    entry
+  );
 
   return matter.stringify(content, next);
 }
@@ -771,10 +773,20 @@ export interface CreateMeetupDraftsFromFileOptions {
   groups: CreateMeetupDraftsOptions["groups"];
   /**
    * The config's primary group — the only one whose ids are mirrored into the
-   * `event_url` / `event_id` scalars. Deliberately independent of `groups`, so
-   * "primary" never depends on which groups a given run happened to select.
+   * `event_url` / `event_id` scalars, and the group a legacy scalar pair without
+   * a readable `event_url` is attributed to. Deliberately independent of
+   * `groups`, so "primary" never depends on which groups a given run happened
+   * to select. Required: without it a numeric `event_id` could be
+   * unattributable, and ignoring it could duplicate a draft.
    */
-  primaryGroup?: string;
+  primaryGroup: string;
+  /**
+   * Every group the config names (primary and `groups`), when it is wider than
+   * this run's `groups`. A legacy `event_url` naming one of them is attributed
+   * to it; one naming a group outside this list, `groups` and `primaryGroup` is
+   * refused, since it may be an old urlname of a group this run would create in.
+   */
+  configuredGroups?: readonly string[];
   venues: VenueMap;
   /**
    * The config's `meetup.timezone`. As in `createMeetupDrafts`: the fallback when
@@ -805,6 +817,12 @@ export type CreateMeetupDraftsFromFileResult = {
  * `{status: "skipped"}` without any API call. That makes a retry after a
  * partial failure safe — it recreates only the groups that are missing.
  *
+ * A legacy `event_url` / `event_id` pair counts for the group its URL names,
+ * or for `primaryGroup` when the URL names none. A URL naming a group this run
+ * does not know (neither `primaryGroup`, `groups` nor `configuredGroups`) is an
+ * error before anything is created: it may be a renamed urlname of one of the
+ * groups, and guessing wrong would duplicate that group's draft.
+ *
  * The file is written back **inside** `onCreated`, once per group, so a failure
  * halfway through still leaves the successful groups recorded on disk. When
  * every requested group is already recorded, this returns before constructing a
@@ -829,7 +847,8 @@ export async function createMeetupDraftsFromFile(
   }
 
   const bookkeeping = {
-    ...(options.primaryGroup !== undefined ? { assumedGroup: options.primaryGroup } : {}),
+    assumedGroup: options.primaryGroup,
+    knownGroups: [...requested.map((g) => g.urlname), ...(options.configuredGroups ?? [])],
     source: options.eventFile,
   };
   let already = createdGroupEvents(fm, bookkeeping);
@@ -893,7 +912,7 @@ export async function createMeetupDraftsFromFile(
         data,
         entry,
         existing: [...already.values()],
-        ...(options.primaryGroup !== undefined ? { primaryGroup: options.primaryGroup } : {}),
+        primaryGroup: options.primaryGroup,
       });
       fs.writeFileSync(options.eventFile, updated);
 

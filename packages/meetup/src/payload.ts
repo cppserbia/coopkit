@@ -58,11 +58,17 @@ export function isEventAlreadyCreated(eventId: unknown): boolean {
   return /^\d+$/.test(s);
 }
 
-const MEETUP_EVENT_URL_RE = /^https?:\/\/(?:www\.)?meetup\.com\/([^/]+)\/events\/\d+/i;
+// An optional locale segment (`/en-AU/`, `/de-DE/`, `/fr/`) may precede the
+// group: Meetup serves localized event pages under it, and a URL copied from
+// one is still that group's event. Backtracking keeps a two-letter group
+// urlname (`meetup.com/js/events/1/`) read as the group, not as a locale.
+const MEETUP_EVENT_URL_RE =
+  /^https?:\/\/(?:www\.)?meetup\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?([^/]+)\/events\/\d+/i;
 
 /**
  * Extract the group urlname from a Meetup event URL
- * (`https://www.meetup.com/<urlname>/events/<id>/`).
+ * (`https://www.meetup.com/<urlname>/events/<id>/`, optionally with a locale
+ * segment such as `https://www.meetup.com/en-AU/<urlname>/events/<id>/`).
  *
  * This is what lets a file written before per-group bookkeeping existed still
  * say which group its `event_url` / `event_id` scalars belong to, so no
@@ -85,10 +91,79 @@ export interface CreatedGroupEventsOptions {
   /**
    * Group to attribute a legacy `event_id` scalar to when `event_url` is
    * missing or is not a Meetup event URL. Typically the config's primary group.
+   * Without it, such a scalar cannot be attributed and is an error.
    */
   assumedGroup?: string;
+  /**
+   * The groups the caller knows about (for a run: the groups it targets and the
+   * primary). When given, a legacy scalar whose `event_url` names a group
+   * outside this list is an error instead of a record for that group: the URL
+   * may carry an old urlname of one of these groups, and guessing wrong creates
+   * a duplicate draft. `assumedGroup` always counts as known.
+   */
+  knownGroups?: readonly string[];
   /** File path (or similar) named in error messages. */
   source?: string;
+}
+
+/** One validated `meetup_events` row, with where it came from. */
+interface RecordedRow {
+  index: number;
+  ref: PublishedEventRef;
+}
+
+/**
+ * Read and validate `meetup_events`, keyed by lower-cased group. Exact
+ * duplicates (same group, same `event_id`) collapse into the first row; the
+ * same group with two different ids is an error, since only one of them can be
+ * the draft that is meant to exist.
+ */
+function recordedRows(list: unknown, where: string): Map<string, RecordedRow> {
+  const rows = new Map<string, RecordedRow>();
+  if (list === undefined || list === null) return rows;
+  if (!Array.isArray(list)) {
+    throw new Error(`meetup_events${where} must be a list of {group, event_id} entries.`);
+  }
+  for (const [index, raw] of list.entries()) {
+    const at = `meetup_events[${index}]${where}`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error(`${at} must be an object with \`group\` and \`event_id\`.`);
+    }
+    const entry = raw as { group?: unknown; event_id?: unknown; event_url?: unknown };
+    if (typeof entry.group !== "string" || entry.group.trim() === "") {
+      throw new Error(`${at} is missing a non-empty \`group\`.`);
+    }
+    if (!isEventAlreadyCreated(entry.event_id)) {
+      throw new Error(
+        `${at} has \`event_id\` ${JSON.stringify(entry.event_id)}, which is not a numeric event id.`
+      );
+    }
+    const group = entry.group.trim();
+    const ref: PublishedEventRef = {
+      group,
+      event_id: String(entry.event_id).trim(),
+      ...(typeof entry.event_url === "string" && entry.event_url !== ""
+        ? { event_url: entry.event_url }
+        : {}),
+    };
+
+    const key = group.toLowerCase();
+    const earlier = rows.get(key);
+    if (earlier === undefined) {
+      rows.set(key, { index, ref });
+    } else if (earlier.ref.event_id !== ref.event_id) {
+      throw new Error(
+        [
+          `meetup_events[${earlier.index}] and meetup_events[${index}]${where} both record group`,
+          `${JSON.stringify(group)}, with different event ids (${earlier.ref.event_id} and ${ref.event_id}).`,
+          "Keep the row of the draft that should exist, delete the other row, then re-run.",
+        ].join(" ")
+      );
+    } else if (earlier.ref.event_url === undefined && ref.event_url !== undefined) {
+      earlier.ref = { ...earlier.ref, event_url: ref.event_url };
+    }
+  }
+  return rows;
 }
 
 /**
@@ -99,11 +174,17 @@ export interface CreatedGroupEventsOptions {
  * Reads `meetup_events`, then folds in the legacy `event_url` / `event_id`
  * scalar pair attributed via `groupUrlnameFromEventUrl` (falling back to
  * `options.assumedGroup`). An explicit `meetup_events` entry always wins over
- * the inferred one.
+ * the inferred one: a scalar whose `event_id` a row already records is taken as
+ * recorded there, and a group that has a row keeps it.
  *
- * Throws on a malformed `meetup_events` entry rather than ignoring it:
- * silently dropping a hand-edited typo would silently create a duplicate
- * draft, which is the exact failure this record exists to prevent.
+ * Fails closed rather than guessing: a record silently dropped, or given to
+ * the wrong group, would silently create a duplicate draft — the exact failure
+ * this record exists to prevent. It throws on:
+ *  - a malformed `meetup_events` row (no `group`, a non-numeric `event_id`);
+ *  - two rows for one group with different `event_id`s;
+ *  - a numeric `event_id` scalar it cannot attribute to any group (no Meetup
+ *    `event_url` and no `assumedGroup`);
+ *  - with `knownGroups`, a scalar whose `event_url` names an unknown group.
  */
 export function createdGroupEvents(
   fm: CreatedEventBookkeeping,
@@ -111,51 +192,103 @@ export function createdGroupEvents(
 ): Map<string, PublishedEventRef> {
   const where = options.source !== undefined ? ` in ${options.source}` : "";
   const created = new Map<string, PublishedEventRef>();
+  for (const [key, row] of recordedRows(fm.meetup_events, where)) created.set(key, row.ref);
 
-  const list = fm.meetup_events;
-  if (list !== undefined && list !== null) {
-    if (!Array.isArray(list)) {
-      throw new Error(`meetup_events${where} must be a list of {group, event_id} entries.`);
-    }
-    for (const [index, raw] of list.entries()) {
-      const at = `meetup_events[${index}]${where}`;
-      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-        throw new Error(`${at} must be an object with \`group\` and \`event_id\`.`);
-      }
-      const entry = raw as { group?: unknown; event_id?: unknown; event_url?: unknown };
-      if (typeof entry.group !== "string" || entry.group.trim() === "") {
-        throw new Error(`${at} is missing a non-empty \`group\`.`);
-      }
-      if (!isEventAlreadyCreated(entry.event_id)) {
-        throw new Error(
-          `${at} has \`event_id\` ${JSON.stringify(entry.event_id)}, which is not a numeric event id.`
-        );
-      }
-      const group = entry.group.trim();
-      created.set(group.toLowerCase(), {
-        group,
-        event_id: String(entry.event_id).trim(),
-        ...(typeof entry.event_url === "string" && entry.event_url !== ""
-          ? { event_url: entry.event_url }
-          : {}),
-      });
-    }
+  if (!isEventAlreadyCreated(fm.event_id)) return created;
+
+  const eventId = String(fm.event_id).trim();
+  if ([...created.values()].some((ref) => ref.event_id === eventId)) return created;
+
+  const urlGroup = groupUrlnameFromEventUrl(fm.event_url);
+  const assumed = options.assumedGroup !== "" ? options.assumedGroup : undefined;
+  const group = urlGroup ?? assumed;
+  const scalar = `event_id=${eventId}${where}`;
+  if (group === undefined) {
+    throw new Error(
+      [
+        `${scalar} cannot be attributed to a Meetup group: event_url`,
+        `${JSON.stringify(fm.event_url ?? null)} is not a Meetup event URL naming one,`,
+        "and no primary group was given to assume. Record it in meetup_events with its",
+        "group (or fix event_url), then re-run.",
+      ].join(" ")
+    );
   }
 
-  if (isEventAlreadyCreated(fm.event_id)) {
-    const group = groupUrlnameFromEventUrl(fm.event_url) ?? options.assumedGroup;
-    if (group !== undefined && group !== "" && !created.has(group.toLowerCase())) {
-      created.set(group.toLowerCase(), {
-        group,
-        event_id: String(fm.event_id).trim(),
-        ...(typeof fm.event_url === "string" && fm.event_url !== ""
-          ? { event_url: fm.event_url }
-          : {}),
-      });
-    }
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  if (
+    urlGroup !== undefined &&
+    options.knownGroups !== undefined &&
+    !options.knownGroups.some((g) => same(g, urlGroup)) &&
+    !(assumed !== undefined && same(assumed, urlGroup))
+  ) {
+    const known = [...(assumed !== undefined ? [assumed] : []), ...options.knownGroups]
+      .filter((g, i, all) => all.findIndex((h) => same(g, h)) === i)
+      .map((g) => JSON.stringify(g))
+      .join(", ");
+    throw new Error(
+      [
+        `${scalar} has an event_url naming group ${JSON.stringify(urlGroup)}, which is not one of`,
+        `${known}. It may be an old urlname of one of them, so it is not guessed at:`,
+        "record the event in meetup_events under the group it belongs to",
+        `(\`- group: <urlname>\` with \`event_id: '${eventId}'\`), then re-run.`,
+      ].join(" ")
+    );
   }
 
+  if (!created.has(group.toLowerCase())) {
+    created.set(group.toLowerCase(), {
+      group,
+      event_id: eventId,
+      ...(typeof fm.event_url === "string" && fm.event_url !== ""
+        ? { event_url: fm.event_url }
+        : {}),
+    });
+  }
   return created;
+}
+
+/**
+ * The rows to write as `meetup_events`: one per ref in `refs`, in order, each
+ * built on the row already in `current` for that group (matched
+ * case-insensitively) so that keys a person added — a `note:`, say — survive
+ * the rewrite. `group` and `event_id` are always taken from the ref, and so is
+ * `event_url` when the ref has one. The row for `refreshed` (a group just
+ * created again) also loses a stale `event_url` the ref does not carry.
+ */
+export function meetupEventsRows(
+  refs: readonly PublishedEventRef[],
+  current: unknown,
+  refreshed?: PublishedEventRef
+): Array<Record<string, unknown>> {
+  const byGroup = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(current)) {
+    for (const raw of current) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+      const row = raw as Record<string, unknown>;
+      if (typeof row.group !== "string") continue;
+      const key = row.group.trim().toLowerCase();
+      const earlier = byGroup.get(key);
+      if (earlier === undefined) {
+        byGroup.set(key, { ...row });
+        continue;
+      }
+      // An exact duplicate row: keep the first, plus any key only the other has.
+      for (const [k, v] of Object.entries(row)) if (!(k in earlier)) earlier[k] = v;
+    }
+  }
+
+  return refs.map((ref) => {
+    // A refreshed row keeps its added keys, but not the url of the draft it replaces.
+    const row: Record<string, unknown> = Object.fromEntries(
+      Object.entries(byGroup.get(ref.group.toLowerCase()) ?? {}).filter(
+        ([key]) => !(ref === refreshed && key === "event_url")
+      )
+    );
+    row.group = ref.group;
+    row.event_id = ref.event_id;
+    if (ref.event_url !== undefined) row.event_url = ref.event_url;
+    return row;
+  });
 }
 
 /**

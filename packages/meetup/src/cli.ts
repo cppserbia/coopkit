@@ -209,6 +209,9 @@ const createCmd = defineCommand({
       // Always the config's primary group, never whichever group --groups
       // happens to name first: the scalars must keep pointing at one group.
       primaryGroup: config.groupUrlname,
+      // So a legacy event_url naming a configured group this run leaves out is
+      // attributed to it rather than refused as unknown.
+      configuredGroups: [config.groupUrlname, ...(config.groups ?? [])],
       venues: config.venues,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
       dryRun: Boolean(args["dry-run"]),

@@ -43,9 +43,24 @@ afterEach(() => {
 const quiet = () => {};
 
 /** The event file with an already-recorded `meetup_events` list. */
-function withMeetupEvents(rows: Array<{ group: string; event_id: string }>): string {
+function withMeetupEvents(rows: Array<Record<string, string>>): string {
   const parsed = matter(FRONTMATTER);
   return matter.stringify(parsed.content, { ...parsed.data, meetup_events: rows });
+}
+
+/** The event file with a legacy `event_url` / `event_id` pair (and optionally rows). */
+function withScalars(
+  eventUrl: string,
+  eventId: string,
+  rows?: Array<Record<string, string>>
+): string {
+  const parsed = matter(FRONTMATTER);
+  return matter.stringify(parsed.content, {
+    ...parsed.data,
+    event_url: eventUrl,
+    event_id: eventId,
+    ...(rows !== undefined ? { meetup_events: rows } : {}),
+  });
 }
 
 function statuses(results: Awaited<ReturnType<typeof createMeetupDraftsFromFile>>["results"]) {
@@ -185,11 +200,117 @@ describe("createMeetupDraftsFromFile (dry-run)", () => {
     expect(statuses(results)).toEqual(["dry-run", "skipped", "dry-run"]);
   });
 
+  it("skips the group named by a locale-prefixed legacy event_url", async () => {
+    const file = tempEventFile(
+      withScalars("https://www.meetup.com/en-AU/cpp-serbia/events/313413133/", "313413133")
+    );
+    const { results } = await createMeetupDraftsFromFile({
+      eventFile: file,
+      groups: THREE_GROUPS,
+      primaryGroup: "chicago-c-cpp-users-group",
+      venues: VENUES,
+      dryRun: true,
+      log: quiet,
+    });
+    expect(statuses(results)).toEqual(["dry-run", "skipped", "dry-run"]);
+  });
+
+  it("refuses a legacy event_url naming a group it does not know, before any call", async () => {
+    // A renamed urlname: Cpp-Serbia-Old may be cpp-serbia under its old name.
+    // Attributing it there or ignoring it are both guesses, and the wrong one
+    // duplicates cpp-serbia's draft. dryRun:false, no credentials: it must
+    // throw before anything would need them.
+    const contents = withScalars("https://www.meetup.com/Cpp-Serbia-Old/events/111/", "111");
+    const file = tempEventFile(contents);
+
+    await expect(
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: [{ urlname: "cpp-serbia" }, { urlname: "CPPTORONTO" }],
+        primaryGroup: "cpp-serbia",
+        venues: VENUES,
+        dryRun: false,
+        log: quiet,
+      })
+    ).rejects.toThrow(
+      /event_id=111 in .* has an event_url naming group "Cpp-Serbia-Old", which is not one of "cpp-serbia", "CPPTORONTO".*record the event in meetup_events/
+    );
+    expect(readFileSync(file, "utf8")).toBe(contents);
+  });
+
+  it("proceeds once meetup_events records that event under its group", async () => {
+    const file = tempEventFile(
+      withScalars("https://www.meetup.com/Cpp-Serbia-Old/events/111/", "111", [
+        { group: "cpp-serbia", event_id: "111" },
+      ])
+    );
+    const { results } = await createMeetupDraftsFromFile({
+      eventFile: file,
+      groups: [{ urlname: "cpp-serbia" }, { urlname: "CPPTORONTO" }],
+      primaryGroup: "cpp-serbia",
+      venues: VENUES,
+      dryRun: true,
+      log: quiet,
+    });
+    expect(statuses(results)).toEqual(["skipped", "dry-run"]);
+  });
+
+  it("attributes a legacy event_url naming a configured group this run leaves out", async () => {
+    const file = tempEventFile(
+      withScalars("https://www.meetup.com/cpp-serbia/events/313413133/", "313413133")
+    );
+    const { results } = await createMeetupDraftsFromFile({
+      eventFile: file,
+      groups: [{ urlname: "CPPTORONTO" }],
+      primaryGroup: "chicago-c-cpp-users-group",
+      configuredGroups: ["chicago-c-cpp-users-group", "cpp-serbia", "CPPTORONTO"],
+      venues: VENUES,
+      dryRun: true,
+      log: quiet,
+    });
+    expect(statuses(results)).toEqual(["dry-run"]);
+  });
+
+  it("attributes a numeric event_id without a usable event_url to the primary group", async () => {
+    const file = tempEventFile(withScalars("<Meetup.com Event URL>", "313413133"));
+    const { results } = await createMeetupDraftsFromFile({
+      eventFile: file,
+      groups: THREE_GROUPS,
+      primaryGroup: "chicago-c-cpp-users-group",
+      venues: VENUES,
+      dryRun: true,
+      log: quiet,
+    });
+    expect(statuses(results)).toEqual(["skipped", "dry-run", "dry-run"]);
+  });
+
+  it("refuses two meetup_events rows giving one group different ids", async () => {
+    const file = tempEventFile(
+      withMeetupEvents([
+        { group: "cpp-serbia", event_id: "111" },
+        { group: "CPP-Serbia", event_id: "222" },
+      ])
+    );
+    await expect(
+      createMeetupDraftsFromFile({
+        eventFile: file,
+        groups: THREE_GROUPS,
+        primaryGroup: "chicago-c-cpp-users-group",
+        venues: VENUES,
+        dryRun: true,
+        log: quiet,
+      })
+    ).rejects.toThrow(
+      /meetup_events\[0\] and meetup_events\[1\] in .*event\.md both record group "CPP-Serbia"/
+    );
+  });
+
   it("rejects when the event file does not exist", async () => {
     await expect(
       createMeetupDraftsFromFile({
         eventFile: join(tmpdir(), "coopkit-does-not-exist-xyz.md"),
         groups: THREE_GROUPS,
+        primaryGroup: "chicago-c-cpp-users-group",
         venues: VENUES,
         dryRun: true,
         log: quiet,
@@ -377,5 +498,63 @@ describe("recordCreatedGroupEvent", () => {
 
     expect(updated.data.meetup_events).toEqual([refreshed, secondary]);
     expect(updated.data.event_id).toBe("999999999");
+  });
+
+  it("keeps keys a person added to existing rows", () => {
+    const updated = matter(
+      recordCreatedGroupEvent({
+        content: parsed.content,
+        data: {
+          ...parsed.data,
+          meetup_events: [{ group: "cpp-serbia", note: "moved venue", event_id: "313413133" }],
+        },
+        entry: secondary,
+        existing: [{ group: "cpp-serbia", event_id: "313413133" }],
+        primaryGroup: "cpp-serbia",
+      })
+    );
+    expect(updated.data.meetup_events).toEqual([
+      { group: "cpp-serbia", note: "moved venue", event_id: "313413133" },
+      secondary,
+    ]);
+    // Key order too: the added key stays where the person put it.
+    expect(Object.keys(updated.data.meetup_events[0])).toEqual(["group", "note", "event_id"]);
+  });
+
+  it("keeps added keys on a row it refreshes, but not its stale event_url", () => {
+    const updated = matter(
+      recordCreatedGroupEvent({
+        content: parsed.content,
+        data: { ...parsed.data, meetup_events: [{ ...primary, note: "keep me" }] },
+        entry: { group: "cpp-serbia", event_id: "999999999" },
+        existing: [primary],
+        primaryGroup: "cpp-serbia",
+      })
+    );
+    expect(updated.data.meetup_events).toEqual([
+      { group: "cpp-serbia", event_id: "999999999", note: "keep me" },
+    ]);
+  });
+
+  it("writes one row for exact duplicate rows, with the keys of both", () => {
+    const updated = matter(
+      recordCreatedGroupEvent({
+        content: parsed.content,
+        data: {
+          ...parsed.data,
+          meetup_events: [
+            { group: "cpp-serbia", event_id: "313413133", note: "first" },
+            { group: "CPP-Serbia", event_id: "313413133", note: "second", by: "alex" },
+          ],
+        },
+        entry: secondary,
+        existing: [{ group: "cpp-serbia", event_id: "313413133" }],
+        primaryGroup: "cpp-serbia",
+      })
+    );
+    expect(updated.data.meetup_events).toEqual([
+      { group: "cpp-serbia", event_id: "313413133", note: "first", by: "alex" },
+      secondary,
+    ]);
   });
 });
