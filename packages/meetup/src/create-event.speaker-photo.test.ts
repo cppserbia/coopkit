@@ -1,6 +1,9 @@
 // The speaker photo path past dry-run: createMeetupDraft against the fake
 // Meetup in testing/fake-meetup.ts, which stands in for fetch, so the real
 // client, mutations and upload run with no network and no credentials.
+//
+// The photo is opt-in (includeSpeakerPhoto), so draft() opts in by default and
+// "without the opt-in" below checks that leaving it out changes nothing.
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { NormalizedEvent } from "@coopkit/core";
 import type { MeetupCredentials } from "./client.js";
@@ -56,7 +59,8 @@ function useFake(options: FakeMeetupOptions = {}): void {
   globalThis.fetch = fake.fetch;
 }
 
-function draft(overrides: Partial<CreateMeetupDraftOptions> = {}) {
+/** A run that sends the speaker profile, as a caller from v0.3.0 would make it. */
+function draftWithoutOptIn(overrides: Partial<CreateMeetupDraftOptions> = {}) {
   return createMeetupDraft({
     event: EVENT,
     groupUrlname: "cpp-serbia",
@@ -66,6 +70,11 @@ function draft(overrides: Partial<CreateMeetupDraftOptions> = {}) {
     log: (m) => logs.push(m),
     ...overrides,
   });
+}
+
+/** The same run, opted into the speaker photo. */
+function draft(overrides: Partial<CreateMeetupDraftOptions> = {}) {
+  return draftWithoutOptIn({ includeSpeakerPhoto: true, ...overrides });
 }
 
 function withSpeaker(patch: Partial<NonNullable<NormalizedEvent["speaker"]>>): NormalizedEvent {
@@ -225,6 +234,12 @@ describe("speaker photo: when it is not attempted", () => {
     expect(result).toMatchObject({ speakerPhotoAttached: false });
   });
 
+  it("does not judge avatarUrl when there is no profile to put it on", async () => {
+    await draft({ includeSpeaker: false, event: withSpeaker({ avatarUrl: "/srv/a.png" }) });
+    expect(fake.ops()).toEqual(["createEvent"]);
+    expect(logs.some((m) => /speaker photo/i.test(m))).toBe(false);
+  });
+
   it("skips it when the speaker has no avatarUrl", async () => {
     const result = await draft({ event: withSpeaker({ avatarUrl: undefined }) });
     expect(fake.ops()).toEqual(["createEvent"]);
@@ -264,13 +279,82 @@ describe("speaker photo: dry run", () => {
   });
 });
 
+describe("speaker photo: without the opt-in", () => {
+  // Everything here would attach the photo with includeSpeakerPhoto: true.
+  // Without it, avatarUrl is ignored as it was before the photo existed.
+  it("sends the profile but never uploads the headshot or calls editEvent", async () => {
+    let onCreatedResult: unknown;
+    const result = await draftWithoutOptIn({
+      onCreated: ({ result }) => {
+        onCreatedResult = result;
+      },
+    });
+
+    expect(fake.ops()).toEqual(["createEvent"]);
+    expect(fake.inputs("createEvent")[0]?.speakerDetails).toBeDefined();
+    expect(result).toEqual({
+      status: "created",
+      eventId: "900001",
+      eventUrl: "https://www.meetup.com/cpp-serbia/events/900001/",
+      photoAttached: false,
+      speakerPhotoAttached: false,
+    });
+    expect(onCreatedResult).toMatchObject({ speakerPhotoAttached: false });
+    expect(logs.some((m) => /speaker photo/i.test(m))).toBe(false);
+  });
+
+  it("still uploads the featured photo, and only that", async () => {
+    const result = await draftWithoutOptIn({
+      event: { ...EVENT, imageUrl: `${IMAGE_HOST}/banner.png` },
+    });
+
+    expect(fake.ops()).toEqual([
+      "createEvent",
+      "groupByUrlname",
+      "image",
+      "createGroupEventPhoto",
+      "upload",
+    ]);
+    expect(fake.inputs("createGroupEventPhoto").map((i) => i.setAsMain)).toEqual([true]);
+    expect(result).toMatchObject({ photoAttached: true, speakerPhotoAttached: false });
+    expect(logs.some((m) => /speaker photo/i.test(m))).toBe(false);
+  });
+
+  it("does not warn about an avatarUrl it would not have used", async () => {
+    await draftWithoutOptIn({ event: withSpeaker({ avatarUrl: "/srv/avatars/andy.png" }) });
+    expect(fake.ops()).toEqual(["createEvent"]);
+    expect(logs.some((m) => /speaker photo/i.test(m))).toBe(false);
+  });
+
+  it("says nothing about a speaker photo in a dry run", async () => {
+    await draftWithoutOptIn({ dryRun: true });
+    expect(fake.calls).toEqual([]);
+    expect(logs.some((m) => /speaker photo/i.test(m))).toBe(false);
+  });
+
+  it("treats an explicit includeSpeakerPhoto: false the same as leaving it out", async () => {
+    const result = await draft({ includeSpeakerPhoto: false });
+    expect(fake.ops()).toEqual(["createEvent"]);
+    expect(result).toMatchObject({ speakerPhotoAttached: false });
+  });
+});
+
 describe("speaker photo across groups", () => {
   it("attaches it only in the groups that take speaker profiles", async () => {
     const { results } = await createMeetupDrafts({
       event: EVENT,
       groups: [
-        { urlname: "cpp-serbia", includeSpeaker: true, timezone: "Europe/Belgrade" },
-        { urlname: "chicago-c-cpp-users-group", timezone: "America/Chicago" },
+        {
+          urlname: "cpp-serbia",
+          includeSpeaker: true,
+          includeSpeakerPhoto: true,
+          timezone: "Europe/Belgrade",
+        },
+        {
+          urlname: "chicago-c-cpp-users-group",
+          includeSpeakerPhoto: true,
+          timezone: "America/Chicago",
+        },
       ],
       venues: { online: "online" },
       credentials,
@@ -282,5 +366,32 @@ describe("speaker photo across groups", () => {
     );
     expect(attached).toEqual([true, false]);
     expect(fake.inputs("editEvent").map((i) => i.eventId)).toEqual(["900001"]);
+  });
+
+  it("attaches it only in the groups that opted into the photo", async () => {
+    const { results } = await createMeetupDrafts({
+      event: EVENT,
+      groups: [
+        { urlname: "cpp-serbia", includeSpeaker: true, timezone: "Europe/Belgrade" },
+        {
+          urlname: "chicago-c-cpp-users-group",
+          includeSpeaker: true,
+          includeSpeakerPhoto: true,
+          timezone: "America/Chicago",
+        },
+      ],
+      venues: { online: "online" },
+      credentials,
+      log: (m) => logs.push(m),
+    });
+
+    const attached = results.map((r) =>
+      r.ok && r.result.status === "created" ? r.result.speakerPhotoAttached : undefined
+    );
+    expect(attached).toEqual([false, true]);
+    // Both groups got the profile; only the second got the photo.
+    expect(fake.inputs("createEvent").map((i) => Boolean(i.speakerDetails))).toEqual([true, true]);
+    expect(fake.inputs("editEvent").map((i) => i.eventId)).toEqual(["900002"]);
+    expect(logs.filter((m) => m.startsWith("Uploading speaker photo"))).toHaveLength(1);
   });
 });

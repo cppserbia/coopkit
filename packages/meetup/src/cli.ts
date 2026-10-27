@@ -131,6 +131,7 @@ const createCmd = defineCommand({
         : {}),
       ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
       includeSpeaker: target.includeSpeaker,
+      includeSpeakerPhoto: target.includeSpeakerPhoto,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
@@ -227,6 +228,7 @@ const createFromJsonCmd = defineCommand({
           : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
         includeSpeaker: target.includeSpeaker,
+        includeSpeakerPhoto: target.includeSpeakerPhoto,
         dryRun: Boolean(args["dry-run"]),
       });
       writeResultFile(args.output, result);

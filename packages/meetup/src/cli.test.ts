@@ -25,11 +25,14 @@ const EVENT = JSON.stringify({
   description: "Body.",
 });
 
-async function run(args: string[]): Promise<{ code: number; stdout: string }> {
+async function run(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const code = await proc.exited;
-  return { code, stdout };
+  return { code, stdout, stderr };
 }
 
 const FAKE_MEETUP = join(import.meta.dir, "testing", "fake-meetup-preload.ts");
@@ -38,15 +41,22 @@ const FAKE_MEETUP = join(import.meta.dir, "testing", "fake-meetup-preload.ts");
  * Run the bin for real, not as a dry run, against the fake Meetup preloaded
  * into the child process (testing/fake-meetup.ts): no network, no secrets.
  */
-async function runAgainstFakeMeetup(args: string[], cwd: string): Promise<{ code: number }> {
+async function runAgainstFakeMeetup(
+  args: string[],
+  cwd: string
+): Promise<{ code: number; stderr: string }> {
   const proc = Bun.spawn(["bun", "--preload", FAKE_MEETUP, CLI, ...args], {
     cwd,
     env: { ...process.env, COOPKIT_FAKE_MEETUP: "{}" },
     stdout: "pipe",
     stderr: "pipe",
   });
+  const [, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const code = await proc.exited;
-  return { code };
+  return { code, stderr };
 }
 
 describe("create-from-json --output (dry-run)", () => {
@@ -194,7 +204,12 @@ describe("--output after a real create", () => {
       writeFileSync(
         config,
         JSON.stringify({
-          meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 }, speakerDetails: true },
+          meetup: {
+            groupUrlname: "cpp-serbia",
+            venues: { online: 42 },
+            speakerDetails: true,
+            speakerPhoto: true,
+          },
         })
       );
       writeFileSync(event, EVENT_WITH_SPEAKER);
@@ -225,6 +240,7 @@ describe("--output after a real create", () => {
       const out = join(dir, "result.json");
       const multi = JSON.parse(MULTI_CONFIG);
       multi.meetup.speakerDetails = ["cpp-serbia"];
+      multi.meetup.speakerPhoto = ["cpp-serbia"];
       writeFileSync(config, JSON.stringify(multi));
       writeFileSync(event, EVENT_WITH_SPEAKER);
 
@@ -257,6 +273,135 @@ describe("--output after a real create", () => {
           },
         ],
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("speakerPhoto is opt-in", () => {
+  const SPEAKER_CONFIG = {
+    groupUrlname: "cpp-serbia",
+    venues: { online: 42 },
+    speakerDetails: true,
+  };
+
+  it("leaves the headshot alone when speakerPhoto is absent", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      writeFileSync(config, JSON.stringify({ meetup: SPEAKER_CONFIG }));
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+
+      const { code, stderr } = await runAgainstFakeMeetup(
+        ["create-from-json", "--config", config, "--output", out, event],
+        dir
+      );
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toMatchObject({
+        status: "created",
+        photoAttached: true,
+        speakerPhotoAttached: false,
+      });
+      expect(stderr).toContain("Photo attached.");
+      expect(stderr).not.toMatch(/speaker photo/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("follows a speakerPhoto list per group", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      const multi = JSON.parse(MULTI_CONFIG);
+      multi.meetup.speakerDetails = true;
+      multi.meetup.speakerPhoto = ["CHICAGO-C-CPP-USERS-GROUP"];
+      writeFileSync(config, JSON.stringify(multi));
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+
+      const { code, stderr } = await runAgainstFakeMeetup(
+        ["create-from-json", "--groups", "all", "--config", config, "--output", out, event],
+        dir
+      );
+
+      expect(code).toBe(0);
+      const { groups } = JSON.parse(readFileSync(out, "utf8"));
+      expect(
+        groups.map((g: { groupUrlname: string; speakerPhotoAttached: boolean }) => [
+          g.groupUrlname,
+          g.speakerPhotoAttached,
+        ])
+      ).toEqual([
+        ["cpp-serbia", false],
+        ["chicago-c-cpp-users-group", true],
+      ]);
+      expect(stderr.match(/Uploading speaker photo/g)).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds the dry-run photo line only when opted in", async () => {
+    const dir = scratch();
+    try {
+      const event = join(dir, "event.json");
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+      const line =
+        "--- DRY RUN: would then upload speaker photo https://images.fake.test/andy-soffer.png and set it via editEvent ---";
+
+      const stderrFor = async (meetup: object): Promise<string> => {
+        const config = join(dir, "coopkit.config.json");
+        writeFileSync(config, JSON.stringify({ meetup }));
+        const { code, stderr } = await run([
+          "create-from-json",
+          "--config",
+          config,
+          "--dry-run",
+          event,
+        ]);
+        expect(code).toBe(0);
+        return stderr;
+      };
+
+      const without = await stderrFor(SPEAKER_CONFIG);
+      const withPhoto = await stderrFor({ ...SPEAKER_CONFIG, speakerPhoto: true });
+
+      expect(without).not.toMatch(/speaker photo/i);
+      expect(withPhoto).toBe(`${without}${line}\n`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a config with speakerPhoto but no speakerDetails", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(
+        config,
+        JSON.stringify({
+          meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 }, speakerPhoto: true },
+        })
+      );
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+
+      const { code, stderr } = await run([
+        "create-from-json",
+        "--config",
+        config,
+        "--dry-run",
+        event,
+      ]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain("meetup.speakerPhoto covers");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

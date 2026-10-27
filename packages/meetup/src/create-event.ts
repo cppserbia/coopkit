@@ -159,7 +159,8 @@ async function uploadEventPhoto(
 /**
  * The headshot to attach to the speaker profile, or undefined when there is
  * nothing to attach: the profile is not being sent (group not opted in, or no
- * bio) or the speaker has no `avatarUrl`.
+ * bio) or the speaker has no `avatarUrl`. Only consulted when the caller opted
+ * into the photo (`includeSpeakerPhoto`).
  *
  * Like the featured photo (`imageUrl`), the headshot is downloaded with
  * `fetch`, so only an http(s) URL works. `NormalizedSpeaker.avatarUrl` may also
@@ -245,6 +246,13 @@ export interface CreateMeetupDraftOptions {
   hosts?: number[];
   /** Attach `event.speaker` as Meetup's Pro speaker profile. */
   includeSpeaker?: boolean;
+  /**
+   * Also give that profile its photo: upload `event.speaker.avatarUrl` (an
+   * http(s) URL) after the event is created and set it with `editEvent`.
+   * Opt-in, default false; without it `avatarUrl` is ignored. Has no effect
+   * unless the profile itself is sent (`includeSpeaker`, and a speaker bio).
+   */
+  includeSpeakerPhoto?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -272,7 +280,10 @@ export type CreateMeetupDraftResult =
       eventId: string;
       eventUrl: string;
       photoAttached: boolean;
-      /** Whether `speaker.avatarUrl` ended up as the speaker profile's photo. */
+      /**
+       * Whether `speaker.avatarUrl` ended up as the speaker profile's photo.
+       * Always false without `includeSpeakerPhoto`.
+       */
       speakerPhotoAttached: boolean;
     };
 
@@ -303,7 +314,11 @@ export async function createMeetupDraft(
     );
   }
 
-  const avatarUrl = speakerPhotoUrl(options.event, payload, log);
+  // Opt-in: without includeSpeakerPhoto, avatarUrl is not looked at, so the
+  // run (and its log) is what it was before the speaker photo existed.
+  const avatarUrl = options.includeSpeakerPhoto
+    ? speakerPhotoUrl(options.event, payload, log)
+    : undefined;
 
   if (options.dryRun) {
     log(`--- DRY RUN: would create Meetup draft for ${options.event.id} ---`);
@@ -388,6 +403,8 @@ export interface CreateMeetupDraftFromFileOptions {
   hosts?: number[];
   /** Attach `event.speaker` as Meetup's Pro speaker profile. */
   includeSpeaker?: boolean;
+  /** Also attach the speaker's photo. See `CreateMeetupDraftOptions.includeSpeakerPhoto`. */
+  includeSpeakerPhoto?: boolean;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
   log?: (message: string) => void;
@@ -434,6 +451,9 @@ export async function createMeetupDraftFromFile(
     ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     ...(options.hosts !== undefined ? { hosts: options.hosts } : {}),
     ...(options.includeSpeaker !== undefined ? { includeSpeaker: options.includeSpeaker } : {}),
+    ...(options.includeSpeakerPhoto !== undefined
+      ? { includeSpeakerPhoto: options.includeSpeakerPhoto }
+      : {}),
     dryRun: options.dryRun,
     credentials: options.credentials,
     log,
@@ -458,6 +478,7 @@ export interface CreateMeetupDraftsOptions {
     urlname: string;
     hosts?: number[];
     includeSpeaker?: boolean;
+    includeSpeakerPhoto?: boolean;
     timezone?: string;
   }>;
   venues: VenueMap;
@@ -514,6 +535,9 @@ export async function createMeetupDrafts(
           : {}),
         ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
         ...(group.includeSpeaker !== undefined ? { includeSpeaker: group.includeSpeaker } : {}),
+        ...(group.includeSpeakerPhoto !== undefined
+          ? { includeSpeakerPhoto: group.includeSpeakerPhoto }
+          : {}),
         ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
         ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
         log,
