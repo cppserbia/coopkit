@@ -34,6 +34,14 @@ export interface MeetupConfig {
    */
   speakerDetails?: boolean | string[];
   /**
+   * Also give the speaker profile its photo, from `speaker.avatarUrl`. Opt-in,
+   * with the same shape as `speakerDetails`: `true` for every group, or a list
+   * of group urlnames. The photo belongs to the profile, so every group this
+   * covers must also have `speakerDetails`; `loadMeetupConfig` refuses a config
+   * where it does not. See `CreateMeetupDraftOptions.includeSpeakerPhoto`.
+   */
+  speakerPhoto?: boolean | string[];
+  /**
    * Per-group IANA timezone, keyed by group urlname.
    *
    * **Required when targeting more than one group**, because Meetup has no
@@ -139,6 +147,33 @@ export function loadMeetupConfig(configPath?: string): MeetupConfig {
       );
     }
   }
+  if (meetup.speakerPhoto !== undefined) {
+    const sp = meetup.speakerPhoto;
+    const ok =
+      typeof sp === "boolean" ||
+      (Array.isArray(sp) && sp.every((g) => typeof g === "string" && g !== ""));
+    if (!ok) {
+      throw new Error(
+        `${resolved}: meetup.speakerPhoto must be true/false or an array of group urlnames.`
+      );
+    }
+    // The photo is attached to the speaker profile, so a group with the photo
+    // but no profile has nothing to attach it to. Fail here rather than at
+    // call time, where it would silently upload nothing.
+    const covered =
+      sp === true ? [meetup.groupUrlname, ...(meetup.groups ?? [])] : sp === false ? [] : sp;
+    const orphaned = covered.filter((g) => !groupAcceptsSpeaker(meetup, g));
+    if (orphaned.length > 0) {
+      const names = orphaned.map((g) => JSON.stringify(g)).join(", ");
+      throw new Error(
+        [
+          `${resolved}: meetup.speakerPhoto covers ${names}, which meetup.speakerDetails does not.`,
+          "The photo is part of the speaker profile: enable speakerDetails for those groups",
+          "or leave them out of speakerPhoto.",
+        ].join(" ")
+      );
+    }
+  }
   if (meetup.groupTimezones !== undefined) {
     const tzs = meetup.groupTimezones;
     if (typeof tzs !== "object" || tzs === null || Array.isArray(tzs)) {
@@ -199,6 +234,11 @@ export interface GroupTarget {
   /** Whether this group accepts Meetup's Pro speaker profile. */
   includeSpeaker: boolean;
   /**
+   * Whether this group opts into the speaker profile's photo. Only takes effect
+   * together with `includeSpeaker`.
+   */
+  includeSpeakerPhoto: boolean;
+  /**
    * IANA timezone this group's wall time is expressed in. Undefined means the
    * event date is already group-local wall time (the legacy reading).
    */
@@ -211,6 +251,14 @@ export function groupAcceptsSpeaker(config: MeetupConfig, urlname: string): bool
   if (sd === undefined || sd === false) return false;
   if (sd === true) return true;
   return sd.some((g) => g.toLowerCase() === urlname.toLowerCase());
+}
+
+/** Does this group opt into the speaker photo? See `MeetupConfig.speakerPhoto`. */
+export function groupAcceptsSpeakerPhoto(config: MeetupConfig, urlname: string): boolean {
+  const sp = config.speakerPhoto;
+  if (sp === undefined || sp === false) return false;
+  if (sp === true) return true;
+  return sp.some((g) => g.toLowerCase() === urlname.toLowerCase());
 }
 
 /**
@@ -286,6 +334,7 @@ export function resolveGroupTargets(
       urlname,
       hosts: resolveHostIds(config, names),
       includeSpeaker: groupAcceptsSpeaker(config, urlname),
+      includeSpeakerPhoto: groupAcceptsSpeakerPhoto(config, urlname),
       ...(timezone !== undefined ? { timezone } : {}),
     };
   });

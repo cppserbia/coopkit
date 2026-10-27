@@ -61,6 +61,11 @@ describe("speakerDetailsFrom", () => {
     });
   });
 
+  it("never sets photoId, even with an avatarUrl: the photo is attached after creation", () => {
+    const details = speakerDetailsFrom({ ...speaker, avatarUrl: "https://example.test/a.png" });
+    expect(details && "photoId" in details).toBe(false);
+  });
+
   it("omits socialNetworks when there are none", () => {
     const details = speakerDetailsFrom(speaker);
     expect(details && "socialNetworks" in details).toBe(false);

@@ -34,6 +34,7 @@ type SingleResult = {
   eventId?: string;
   eventUrl?: string;
   photoAttached?: boolean;
+  speakerPhotoAttached?: boolean;
 };
 
 function summarizeSingle(result: SingleResult) {
@@ -43,6 +44,7 @@ function summarizeSingle(result: SingleResult) {
         eventId: result.eventId ?? "",
         eventUrl: result.eventUrl ?? "",
         photoAttached: result.photoAttached ?? false,
+        speakerPhotoAttached: result.speakerPhotoAttached ?? false,
       }
     : { status: result.status };
 }
@@ -108,7 +110,7 @@ const createCmd = defineCommand({
     output: {
       type: "string",
       description:
-        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached, speakerPhotoAttached).",
     },
   },
   async run({ args }) {
@@ -129,6 +131,7 @@ const createCmd = defineCommand({
         : {}),
       ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
       includeSpeaker: target.includeSpeaker,
+      includeSpeakerPhoto: target.includeSpeakerPhoto,
       dryRun: Boolean(args["dry-run"]),
     });
     writeResultFile(args.output, result);
@@ -191,7 +194,7 @@ const createFromJsonCmd = defineCommand({
     output: {
       type: "string",
       description:
-        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached).",
+        "Write the result as JSON to this file (status, eventId, eventUrl, photoAttached, speakerPhotoAttached).",
     },
   },
   async run({ args }) {
@@ -225,6 +228,7 @@ const createFromJsonCmd = defineCommand({
           : {}),
         ...(target.hosts.length > 0 ? { hosts: target.hosts } : {}),
         includeSpeaker: target.includeSpeaker,
+        includeSpeakerPhoto: target.includeSpeakerPhoto,
         dryRun: Boolean(args["dry-run"]),
       });
       writeResultFile(args.output, result);

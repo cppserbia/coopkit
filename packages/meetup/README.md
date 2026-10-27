@@ -155,7 +155,7 @@ original single-event shape — so existing setups are unaffected. With
 {
   "status": "partial",
   "groups": [
-    { "groupUrlname": "chicago-c-cpp-users-group", "ok": true, "status": "created", "eventId": "1234", "eventUrl": "https://…", "photoAttached": false },
+    { "groupUrlname": "chicago-c-cpp-users-group", "ok": true, "status": "created", "eventId": "1234", "eventUrl": "https://…", "photoAttached": false, "speakerPhotoAttached": false },
     { "groupUrlname": "cpp-serbia", "ok": false, "error": "createEvent returned no event. …" }
   ]
 }
@@ -196,7 +196,7 @@ The mapping from `NormalizedEvent.speaker`:
 | `name` | `speaker.name` | Required by the API. |
 | `description` | `speaker.bioMarkdown` | Required by the API — see below. |
 | `socialNetworks` | `speaker.socialUrls` | Classified into Meetup's service enum. |
-| `photoId` | — | Not supported; needs a separate photo upload. |
+| `photoId` | `speaker.avatarUrl` | Only with `speakerPhoto`, uploaded after the event is created — see below. |
 
 **A speaker with no bio is skipped, with a warning.** Meetup requires a
 non-empty `description`, and sending an empty string would publish a hollow
@@ -210,6 +210,55 @@ personal site. Entries that are not URLs are dropped rather than guessed at. The
 full URL is kept as the `identifier`: Meetup's name for the field suggests a bare
 handle, but the per-service shape is undocumented, and a URL is unambiguous and
 lossless for every service including `OTHER`.
+
+#### Speaker photo (opt-in)
+
+`speaker.avatarUrl` is ignored unless you also turn on `speakerPhoto`, which
+takes the same forms as `speakerDetails` — `true` for every group, or a list of
+group urlnames (case-insensitive):
+
+```json
+"speakerDetails": ["chicago-c-cpp-users-group", "cpp-serbia"],
+"speakerPhoto": ["cpp-serbia"]
+```
+
+Without it nothing changes from v0.3.0: no upload, no `editEvent`, no extra
+log lines, and `speakerPhotoAttached` is `false`. In the library API the same
+switch is `includeSpeakerPhoto: true` on `createMeetupDraft` (or on a group
+passed to `createMeetupDrafts`), next to `includeSpeaker`; there is no config
+to check there, so without `includeSpeaker` it simply does nothing.
+
+The photo belongs to the speaker profile, so **every group `speakerPhoto` covers
+must also have `speakerDetails`**. A config where one does not is refused when
+it is loaded, rather than silently uploading nothing; `"speakerPhoto": true`
+covers `groupUrlname` and every group in `groups`. Even when both are on, a
+speaker with no bio sends no profile and therefore no photo.
+
+**The speaker photo goes on after the event exists.** `photoId` must name a
+photo the group already holds, and the API has no speaker photo upload, so
+`createEvent` sends the profile without one. Once the draft is created, the
+headshot at `avatarUrl` is uploaded as one of the event's photos
+(`EVENT_PHOTO`, not set as the featured photo, so the banner stays) and the
+profile is sent again through `editEvent`, now with `photoId`. A dry run makes
+no calls and just says it would upload the photo.
+
+A photo problem never costs you the draft or the rest of the profile: any
+failure, from a dead `avatarUrl` to Meetup rejecting the `photoId`, is logged
+as a warning and the draft is kept as created. Whether it worked is reported
+as `speakerPhotoAttached`, next to `photoAttached`, in the `createMeetupDraft`
+result and in `--output` (always `false` without `speakerPhoto`). Nothing is
+rolled back: if the upload worked but `editEvent` did not, the headshot is left
+among the event's photos.
+
+`avatarUrl` must be an http(s) URL. It is downloaded the same way as the
+featured `imageUrl`, which takes only URLs, so a filesystem path (which
+`NormalizedSpeaker` also allows) is skipped with a warning.
+
+> **Not yet verified against the live API.** The upload is the same one the
+> featured photo uses, but attaching it through `speakerDetails.photoId` on
+> `editEvent` has not been exercised on a real Pro event. `speakerPhotoAttached:
+> true` means Meetup accepted the edit, not that anyone has seen the photo on
+> the page, so check the first draft by hand.
 
 ### Hosts
 
@@ -381,3 +430,5 @@ Required secrets for both: `MEETUP_CLIENT_KEY`, `MEETUP_MEMBER_ID`, `MEETUP_SIGN
 | `Meetup group not found for urlname "…"` | `groupUrlname` is wrong or the member isn't an organizer of the group. |
 | `OAuth2 token exchange failed: 401` | Private key, signing-key ID, or client key mismatch. |
 | `createGroupEventPhoto returned no photo or uploadUrl` | Meetup rejected the image. Check the URL is reachable and < ~10 MB. |
+| `meetup.speakerPhoto covers "…", which meetup.speakerDetails does not` | `speakerPhoto` names a group with no speaker profile to attach the photo to. Add the group to `speakerDetails`, or leave it out of `speakerPhoto`. |
+| `[warn] Speaker photo failed, keeping the speaker profile without it` | The draft and profile were created; only the headshot is missing. The rest of the message says which step failed. Add the photo in Meetup's editor. |
