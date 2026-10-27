@@ -9,6 +9,7 @@ import {
   type MeetupCredentials,
   createMeetupClient,
 } from "./client.js";
+import { fetchGroupInfo } from "./list-groups.js";
 import {
   type CreateEventPayload,
   buildCreateEventPayload,
@@ -482,7 +483,13 @@ export interface CreateMeetupDraftsOptions {
     timezone?: string;
   }>;
   venues: VenueMap;
-  /** Fallback IANA timezone for groups that name none. See `BuildPayloadInput.timezone`. */
+  /**
+   * The event date is a true instant (see `BuildPayloadInput.timezone`). With a
+   * single group, this is that group's zone when it names none. With several,
+   * it is never applied to them — it would be the wrong zone for all but one —
+   * and each group naming no `timezone` has its zone looked up from Meetup
+   * before any draft is created. Omit it for the legacy wall-time reading.
+   */
   timezone?: string;
   dryRun?: boolean;
   credentials?: MeetupCredentials;
@@ -513,6 +520,11 @@ export type CreateMeetupDraftsResult = {
  * one group failing does not stop the rest. Every outcome is reported, so the
  * caller can retry only the groups that failed. There is no cross-group
  * rollback: on partial failure the drafts that succeeded stay.
+ *
+ * Timezones are settled first, though: when `timezone` is set and several
+ * groups are given, every group without its own `timezone` is looked up from
+ * Meetup before anything is created, and a failed lookup (or a dry run, which
+ * makes no API calls) throws with no draft created.
  */
 export async function createMeetupDrafts(
   options: CreateMeetupDraftsOptions
@@ -522,17 +534,18 @@ export async function createMeetupDrafts(
     throw new Error("createMeetupDrafts called with no groups.");
   }
 
+  const timezones = await resolveDraftTimezones(options, log);
+
   const results: CreateMeetupDraftsResult["results"] = [];
   for (const [index, group] of options.groups.entries()) {
     log(`[${index + 1}/${options.groups.length}] ${group.urlname}`);
+    const timezone = timezones[index];
     try {
       const result = await createMeetupDraft({
         event: options.event,
         groupUrlname: group.urlname,
         venues: options.venues,
-        ...((group.timezone ?? options.timezone) !== undefined
-          ? { timezone: (group.timezone ?? options.timezone) as string }
-          : {}),
+        ...(timezone !== undefined ? { timezone } : {}),
         ...(group.hosts !== undefined ? { hosts: group.hosts } : {}),
         ...(group.includeSpeaker !== undefined ? { includeSpeaker: group.includeSpeaker } : {}),
         ...(group.includeSpeakerPhoto !== undefined
@@ -556,4 +569,103 @@ export async function createMeetupDrafts(
     failed.length > 0 ? `; failed: ${failed.map((f) => f.groupUrlname).join(", ")}` : "";
   log(`Done: ${results.length - failed.length}/${results.length} group(s) succeeded${failedNote}`);
   return { results };
+}
+
+/**
+ * The timezone each group's wall time is written in, aligned with
+ * `options.groups`.
+ *
+ * A group's own `timezone` always wins. Otherwise, with a single group or no
+ * `options.timezone`, it falls back to `options.timezone` as before (unset
+ * being the legacy wall-time reading). A shared timezone across several groups
+ * is right for one of them at most, so there the groups naming no zone get the
+ * one Meetup holds for them instead.
+ */
+async function resolveDraftTimezones(
+  options: CreateMeetupDraftsOptions,
+  log: (message: string) => void
+): Promise<Array<string | undefined>> {
+  const { groups, timezone: shared } = options;
+  if (groups.length === 1 || shared === undefined) {
+    return groups.map((g) => g.timezone ?? shared);
+  }
+
+  const missing = groups.filter((g) => g.timezone === undefined).map((g) => g.urlname);
+  const lookedUp = await lookUpGroupTimezones(missing, options, log);
+  return groups.map((g) => g.timezone ?? lookedUp.get(g.urlname.toLowerCase()));
+}
+
+/**
+ * Ask Meetup for each group's timezone, all or nothing: any group that cannot
+ * be resolved throws before a single draft exists, so a lookup failure never
+ * leaves a partial run behind. Returns zones keyed by lowercased urlname.
+ */
+async function lookUpGroupTimezones(
+  urlnames: string[],
+  options: Pick<CreateMeetupDraftsOptions, "dryRun" | "credentials">,
+  log: (message: string) => void
+): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  // Meetup urlnames are case-insensitive: one lookup per group, however spelled.
+  const unique = urlnames.filter(
+    (u, i) => urlnames.findIndex((v) => v.toLowerCase() === u.toLowerCase()) === i
+  );
+  if (unique.length === 0) return found;
+
+  const quote = (list: string[]) => list.map((u) => JSON.stringify(u)).join(", ");
+  const pinHint = (list: string[]) =>
+    `Add meetup.groupTimezones entries for ${quote(list)} (run \`coopkit-meetup list-groups\` to print them)`;
+
+  if (options.dryRun) {
+    throw new Error(
+      [
+        `Dry run cannot look up the timezone of ${quote(unique)}: it makes no Meetup API calls,`,
+        `and a multi-group run needs each group's own timezone. ${pinHint(unique)},`,
+        "or run without --dry-run to look them up.",
+      ].join(" ")
+    );
+  }
+
+  const failures: Array<{ urlname: string; reason: string }> = [];
+  let client: MeetupClient | undefined;
+  try {
+    client = createMeetupClient(options.credentials);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    for (const urlname of unique) failures.push({ urlname, reason });
+  }
+
+  if (client) {
+    for (const urlname of unique) {
+      try {
+        const info = await fetchGroupInfo(client, urlname);
+        if (info.timezone) found.set(urlname.toLowerCase(), info.timezone);
+        else failures.push({ urlname, reason: "Meetup returned none" });
+      } catch (err) {
+        failures.push({ urlname, reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
+  if (failures.length > 0) {
+    // One cause shared by every group (no credentials, a rejected token) is said once.
+    const clean = (reason: string) => reason.trim().replace(/\.$/, "");
+    const failed = failures.map((f) => f.urlname);
+    const reasons = new Set(failures.map((f) => clean(f.reason)));
+    const detail =
+      reasons.size === 1
+        ? `${quote(failed)} (${[...reasons][0]})`
+        : failures.map((f) => `${JSON.stringify(f.urlname)} (${clean(f.reason)})`).join(", ");
+    throw new Error(
+      `No drafts were created: could not get the timezone of ${detail} from Meetup. ${pinHint(failed)}.`
+    );
+  }
+
+  for (const urlname of unique) {
+    const timezone = found.get(urlname.toLowerCase());
+    log(
+      `[info] Using Meetup's timezone for ${urlname}: ${timezone} (pin it with meetup.groupTimezones)`
+    );
+  }
+  return found;
 }

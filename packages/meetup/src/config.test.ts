@@ -401,27 +401,33 @@ describe("per-group timezones", () => {
     expect(targets.find((t) => t.urlname === "cpptoronto")?.timezone).toBe("America/Toronto");
   });
 
-  it("refuses a multi-group run that has only one shared timezone", () => {
+  it("does not spread a shared timezone across a multi-group run", () => {
     // The bug this guards: one wall time sent to groups in different zones is a
-    // different instant in each.
-    expect(() =>
-      resolveGroupTargets({
-        groupUrlname: "chicago-c-cpp-users-group",
-        venues: { online: "online" },
-        groups: ["cpp-serbia"],
-        timezone: "America/Chicago",
-      })
-    ).toThrow(/cannot describe a multi-group run/);
+    // different instant in each. Unmapped groups are left for createMeetupDrafts
+    // to look up, and resolving them is no error (the v0.3.0 network config).
+    const targets = resolveGroupTargets({
+      groupUrlname: "chicago-c-cpp-users-group",
+      venues: { online: "online" },
+      groups: ["cpp-serbia"],
+      timezone: "America/Chicago",
+    });
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", undefined],
+      ["cpp-serbia", undefined],
+    ]);
   });
 
-  it("names the groups missing a timezone", () => {
-    expect(() =>
-      resolveGroupTargets({
-        ...NETWORK,
-        timezone: "America/Chicago",
-        groupTimezones: { "chicago-c-cpp-users-group": "America/Chicago" },
-      })
-    ).toThrow(/"cpp-serbia", "CPPTORONTO"/);
+  it("keeps groupTimezones entries and leaves only the unmapped groups without one", () => {
+    const targets = resolveGroupTargets({
+      ...NETWORK,
+      timezone: "America/Chicago",
+      groupTimezones: { "chicago-c-cpp-users-group": "America/Chicago" },
+    });
+    expect(targets.map((t) => [t.urlname, t.timezone])).toEqual([
+      ["chicago-c-cpp-users-group", "America/Chicago"],
+      ["cpp-serbia", undefined],
+      ["CPPTORONTO", undefined],
+    ]);
   });
 
   it("allows a single-group run with only the shared timezone", () => {
