@@ -416,6 +416,18 @@ interface ReadEventFile {
 }
 
 /**
+ * Parse frontmatter without gray-matter's cache. Called with no options,
+ * `matter()` hands back the object it cached for that exact content, `data`
+ * included, so editing `data` would edit the cache: a second file with the same
+ * bytes, read later in the same process, would come back already carrying the
+ * first one's `event_id` and be skipped as created. Any options object, even
+ * an empty one, bypasses the cache.
+ */
+function parseFrontmatter(raw: string): matter.GrayMatterFile<string> {
+  return matter(raw, {});
+}
+
+/**
  * Read an event markdown file and normalize it. No idempotency check here —
  * both file entry points do that themselves, against different scopes (one
  * group vs. a set of them).
@@ -425,7 +437,7 @@ function readEventFile(eventFile: string): ReadEventFile {
     throw new Error(`Event file not found: ${eventFile}`);
   }
 
-  const parsed = matter(fs.readFileSync(eventFile, "utf8"));
+  const parsed = parseFrontmatter(fs.readFileSync(eventFile, "utf8"));
   const fm = parsed.data as EventFileFrontmatter;
   const id = path.basename(eventFile).replace(/\.md$/, "");
   const event = frontmatterToNormalizedEvent(id, fm, stripLeadingHeading(parsed.content));
@@ -511,9 +523,19 @@ export type CreateMeetupDraftFromFileResult =
  * Convenience wrapper for the file-per-event source pattern. Reads the
  * markdown file, normalizes the frontmatter + (H1-stripped) body into a
  * `NormalizedEvent`, calls `createMeetupDraft`, and writes `event_url` +
- * `event_id` back into the file's frontmatter on success. Idempotent: if
- * the frontmatter already contains a numeric `event_id`, returns
- * `{status: "skipped"}` without calling Meetup.
+ * `event_id` back into the file's frontmatter on success.
+ *
+ * Idempotent, by two rules checked in this order, both returning
+ * `{status: "skipped"}` without calling Meetup:
+ *  1. The frontmatter already has a numeric `event_id` — whichever group it
+ *     belongs to. This is the v0.3.0 rule and log line, unchanged: the file
+ *     says the event exists, and guessing that it exists somewhere else would
+ *     risk a duplicate draft, which Meetup cannot roll back.
+ *  2. `meetup_events` (written by a multi-group run) records this group.
+ *
+ * The write-back is the v0.3.0 one — `event_url` and `event_id` — plus, only
+ * when the file already has a `meetup_events` list, this group's row in it, so
+ * that list stays the complete record. A file without one never gains it.
  */
 export async function createMeetupDraftFromFile(
   options: CreateMeetupDraftFromFileOptions
@@ -522,21 +544,21 @@ export async function createMeetupDraftFromFile(
 
   const { parsed, fm, event } = readEventFile(options.eventFile);
 
-  // Same dedup rule as the multi-group entry point, scoped to this one group:
-  // a group recorded in `meetup_events` counts as created even when the
-  // scalars are empty (they only ever mirror the primary group).
+  if (isEventAlreadyCreated(fm.event_id)) {
+    const reason = `${options.eventFile} already has event_id=${fm.event_id}; nothing to do.`;
+    log(`[skip] ${reason}`);
+    return { status: "skipped", reason };
+  }
+
+  // The scalar is not an id, so only `meetup_events` is left to consult (and to
+  // validate: a malformed row is an error here too, before any API call).
   const already = createdGroupEvents(fm, {
     assumedGroup: options.groupUrlname,
     source: options.eventFile,
   });
   const recorded = already.get(options.groupUrlname.toLowerCase());
   if (recorded) {
-    // Keep the original wording when the scalar is what matched, so callers
-    // grepping for it (and the existing workflows) see no change.
-    const reason =
-      isEventAlreadyCreated(fm.event_id) && String(fm.event_id).trim() === recorded.event_id
-        ? `${options.eventFile} already has event_id=${fm.event_id}; nothing to do.`
-        : alreadyCreatedReason(options.eventFile, recorded);
+    const reason = alreadyCreatedReason(options.eventFile, recorded);
     log(`[skip] ${reason}`);
     return { status: "skipped", reason };
   }
@@ -555,10 +577,30 @@ export async function createMeetupDraftFromFile(
     credentials: options.credentials,
     log,
     onCreated: async ({ result }) => {
-      parsed.data.event_url = result.eventUrl;
-      parsed.data.event_id = result.eventId;
-      fs.writeFileSync(options.eventFile, matter.stringify(parsed.content, parsed.data));
-      log(`[updated] ${options.eventFile} with event_url + event_id`);
+      // Assigning onto a copy keeps the key order v0.3.0 wrote: existing
+      // placeholders are replaced in place, missing keys are appended.
+      const next: Record<string, unknown> = { ...parsed.data };
+      next.event_url = result.eventUrl;
+      next.event_id = result.eventId;
+      const withList = Array.isArray(next.meetup_events);
+      if (withList) {
+        const entry: PublishedEventRef = {
+          group: options.groupUrlname,
+          event_id: result.eventId,
+          ...(result.eventUrl !== "" ? { event_url: result.eventUrl } : {}),
+        };
+        next.meetup_events = meetupEventsRows(
+          mergeCreatedGroupEvents([...already.values()], entry),
+          next.meetup_events,
+          entry
+        );
+      }
+      fs.writeFileSync(options.eventFile, matter.stringify(parsed.content, next));
+      log(
+        withList
+          ? `[updated] ${options.eventFile} with event_url + event_id and its meetup_events entry for ${options.groupUrlname}`
+          : `[updated] ${options.eventFile} with event_url + event_id`
+      );
     },
   });
 }
@@ -918,7 +960,7 @@ export async function createMeetupDraftsFromFile(
 
       // Re-read our own output so the next group merges onto exactly what is
       // on disk, rather than a hand-maintained copy that could drift.
-      const reloaded = matter(updated);
+      const reloaded = parseFrontmatter(updated);
       content = reloaded.content;
       data = reloaded.data as Record<string, unknown>;
       already = createdGroupEvents(data as CreatedEventBookkeeping, bookkeeping);
