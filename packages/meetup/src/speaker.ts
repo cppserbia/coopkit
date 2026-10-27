@@ -9,6 +9,12 @@ export interface SpeakerDetailsInput {
   name: string;
   description: string;
   socialNetworks?: Array<{ service: SocialNetworkService; identifier: string }>;
+  /**
+   * Numeric ID of a photo that already belongs to the group. Never set at
+   * create time: the headshot can only be uploaded once the event exists, so
+   * `createMeetupDraft` attaches it afterwards with `editEvent`.
+   */
+  photoId?: string;
 }
 
 /** The services Meetup's SocialNetworkService enum accepts. */
@@ -61,6 +67,8 @@ export function classifySocialUrl(
  * Returns undefined when there is no speaker, or no bio: Meetup requires a
  * non-empty `description`, and inventing one (or sending an empty string) would
  * publish a hollow speaker profile. The caller logs the skip.
+ *
+ * `speaker.avatarUrl` is deliberately not read here; see `photoId`.
  */
 export function speakerDetailsFrom(
   speaker: NormalizedSpeaker | undefined

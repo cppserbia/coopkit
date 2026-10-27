@@ -32,6 +32,23 @@ async function run(args: string[]): Promise<{ code: number; stdout: string }> {
   return { code, stdout };
 }
 
+const FAKE_MEETUP = join(import.meta.dir, "testing", "fake-meetup-preload.ts");
+
+/**
+ * Run the bin for real, not as a dry run, against the fake Meetup preloaded
+ * into the child process (testing/fake-meetup.ts): no network, no secrets.
+ */
+async function runAgainstFakeMeetup(args: string[], cwd: string): Promise<{ code: number }> {
+  const proc = Bun.spawn(["bun", "--preload", FAKE_MEETUP, CLI, ...args], {
+    cwd,
+    env: { ...process.env, COOPKIT_FAKE_MEETUP: "{}" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await proc.exited;
+  return { code };
+}
+
 describe("create-from-json --output (dry-run)", () => {
   it("writes a result JSON file and exits 0", async () => {
     const dir = scratch();
@@ -150,6 +167,96 @@ describe("exit codes", () => {
 
       expect(code).toBe(0);
       expect(JSON.parse(readFileSync(out, "utf8")).status).toBe("dry-run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** An event whose speaker has a bio and a headshot, plus a featured banner. */
+const EVENT_WITH_SPEAKER = JSON.stringify({
+  ...JSON.parse(EVENT),
+  imageUrl: "https://images.fake.test/banner.png",
+  speaker: {
+    name: "Andy Soffer",
+    bioMarkdown: "A lapsed mathematician turned software engineer.",
+    avatarUrl: "https://images.fake.test/andy-soffer.png",
+  },
+});
+
+describe("--output after a real create", () => {
+  it("adds speakerPhotoAttached to the single-group result", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      writeFileSync(
+        config,
+        JSON.stringify({
+          meetup: { groupUrlname: "cpp-serbia", venues: { online: 42 }, speakerDetails: true },
+        })
+      );
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+
+      const { code } = await runAgainstFakeMeetup(
+        ["create-from-json", "--config", config, "--output", out, event],
+        dir
+      );
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({
+        status: "created",
+        eventId: "900001",
+        eventUrl: "https://www.meetup.com/cpp-serbia/events/900001/",
+        photoAttached: true,
+        speakerPhotoAttached: true,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds speakerPhotoAttached to each group of a multi-group result", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      const multi = JSON.parse(MULTI_CONFIG);
+      multi.meetup.speakerDetails = ["cpp-serbia"];
+      writeFileSync(config, JSON.stringify(multi));
+      writeFileSync(event, EVENT_WITH_SPEAKER);
+
+      const { code } = await runAgainstFakeMeetup(
+        ["create-from-json", "--groups", "all", "--config", config, "--output", out, event],
+        dir
+      );
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({
+        status: "created",
+        groups: [
+          {
+            groupUrlname: "cpp-serbia",
+            ok: true,
+            status: "created",
+            eventId: "900001",
+            eventUrl: "https://www.meetup.com/cpp-serbia/events/900001/",
+            photoAttached: true,
+            speakerPhotoAttached: true,
+          },
+          {
+            groupUrlname: "chicago-c-cpp-users-group",
+            ok: true,
+            status: "created",
+            eventId: "900002",
+            eventUrl: "https://www.meetup.com/chicago-c-cpp-users-group/events/900002/",
+            photoAttached: true,
+            speakerPhotoAttached: false,
+          },
+        ],
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
