@@ -96,6 +96,74 @@ const MULTI_CONFIG = JSON.stringify({
 /** Same event, but pointing at a venue key the config does not define. */
 const EVENT_BAD_VENUE = JSON.stringify({ ...JSON.parse(EVENT), venueKey: "nope" });
 
+// The network config the v0.3.0 README taught: one `timezone`, several `groups`,
+// no `groupTimezones` (which did not exist yet). Adopters running single-group
+// creates against it -- the GitHub Action never passes --groups -- must keep working.
+const SHARED_TZ_NETWORK_CONFIG = JSON.stringify({
+  meetup: {
+    groupUrlname: "chicago-c-cpp-users-group",
+    timezone: "America/Chicago",
+    groups: ["cpp-serbia", "CPPTORONTO"],
+    venues: { online: 42 },
+  },
+});
+
+describe("create-from-json with a shared-timezone network config", () => {
+  it("creates in groupUrlname alone without --groups, converting with meetup.timezone", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      const out = join(dir, "result.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code, stdout } = await run([
+        "create-from-json",
+        "--config",
+        config,
+        "--dry-run",
+        "--output",
+        out,
+        event,
+      ]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({ status: "dry-run" });
+      const payload = JSON.parse(stdout);
+      expect(payload.groupUrlname).toBe("chicago-c-cpp-users-group");
+      // 16:00Z on 2026-05-09 is 11:00 in Chicago (CDT).
+      expect(payload.startDateTime).toBe("2026-05-09T11:00:00");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses an explicit multi-group run without groupTimezones", async () => {
+    const dir = scratch();
+    try {
+      const config = join(dir, "coopkit.config.json");
+      const event = join(dir, "event.json");
+      writeFileSync(config, SHARED_TZ_NETWORK_CONFIG);
+      writeFileSync(event, EVENT);
+
+      const { code } = await run([
+        "create-from-json",
+        "--groups",
+        "all",
+        "--config",
+        config,
+        "--dry-run",
+        event,
+      ]);
+
+      expect(code).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("exit codes", () => {
   it("exits 1 when a group in a multi-group run fails", async () => {
     const dir = scratch();

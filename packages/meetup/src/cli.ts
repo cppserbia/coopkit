@@ -202,8 +202,12 @@ const createFromJsonCmd = defineCommand({
     const hostNames = parseHostArg(args.host);
     const requested = parseHostArg(args.groups);
     const multiGroup = requested !== undefined;
-    const only =
-      requested && !(requested.length === 1 && requested[0]?.toLowerCase() === "all")
+    // Without --groups only groupUrlname is created, so resolve only that one,
+    // as `create` does: resolving every configured group would apply the
+    // multi-group timezone check to a run that targets a single group.
+    const only = !multiGroup
+      ? [config.groupUrlname]
+      : !(requested.length === 1 && requested[0]?.toLowerCase() === "all")
         ? requested
         : undefined;
     const targets = resolveGroupTargets(config, {
